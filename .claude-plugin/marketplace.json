@@ -1,0 +1,18 @@
+{
+  "name": "symphony-claude-lane",
+  "metadata": {
+    "description": "A portable skill for adding a specialized Claude Code lane to an existing OpenAI Symphony + Linear workflow.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "symphony-claude-lane",
+      "description": "Add a Claude specialist lane to Symphony + Linear workflows for UI, design, browser-verified, and review work.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/symphony-claude-lane"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "symphony-claude-lane",
+  "description": "Add a specialized Claude Code lane to an existing OpenAI Symphony + Linear workflow for UI, design, browser-verified, and review work.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Contributors"
+  },
+  "repository": "https://github.com/jvogan/symphony-claude-lane",
+  "license": "MIT",
+  "keywords": [
+    "symphony",
+    "claude",
+    "openai",
+    "linear",
+    "orchestration",
+    "mixed-lane",
+    "agent-skill"
+  ]
+}

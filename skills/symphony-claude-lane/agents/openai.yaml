@@ -1,0 +1,13 @@
+interface:
+  display_name: "Symphony + Claude Lane"
+  short_description: "Add a Claude specialist lane to Symphony"
+  default_prompt: "Use $symphony-claude-lane to add a UI-first but extensible Claude lane to this Symphony + Linear repo, persist the routing profile, and document safe closeout behavior."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "linear"
+      description: "Linear MCP server for queue, state, and closeout guidance"
+      transport: "streamable_http"
+      url: "https://mcp.linear.app/mcp"
+policy:
+  allow_implicit_invocation: true

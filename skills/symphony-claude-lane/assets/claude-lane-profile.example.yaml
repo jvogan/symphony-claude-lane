@@ -1,0 +1,90 @@
+# Copy this file into the adopter repo as `.orchestration/claude-lane.yaml`
+# and edit it to match the repo's actual mixed-lane policy.
+
+schema_version: 1
+
+# Default lane stance for Claude. Start narrow, expand with evidence.
+default_lane_mode: ui-first-extensible
+
+# Work types Claude owns by default.
+claude_focus_areas:
+  - ui
+  - ux
+  - design
+  - browser-verification
+  - copy
+  - review
+
+# Areas the adopter may explicitly add later.
+optional_claude_focus_areas:
+  - docs
+  - release-notes
+  - e2e
+  - research
+  - issue-shaping
+
+# Labels that should route to Claude even if the summary is ambiguous.
+always_route_labels:
+  - lane:claude
+  - kind:ui
+  - kind:ux
+  - kind:design
+  - kind:copy
+
+# Labels that should stay out of the Claude lane by default.
+never_route_labels:
+  - kind:infra
+  - kind:ci
+  - kind:types
+  - kind:migration
+  - kind:refactor
+
+# Visual verification policy for tickets that affect rendered output.
+visual_verification_required:
+  enabled: true
+  labels:
+    - kind:ui
+    - kind:ux
+    - kind:design
+  paths:
+    - app/
+    - src/
+    - pages/
+    - components/
+
+# Preferred Claude models by work type. Keep values generic unless the adopter
+# has a stricter local model policy.
+preferred_models:
+  default: opus
+  lighter_weight:
+    - sonnet
+
+# Default closeout policy. Use `in-review` unless the adopter has a proven,
+# safe self-close workflow.
+closeout_mode:
+  default: in-review
+  on_control_plane_failure: preserve-artifacts
+  allow_self_close_for:
+    - direct-branch
+    - direct-pr
+
+# Cleanup and retention policy. Fill this in for the adopter's actual storage
+# footprint rather than assuming worktrees are the only cost.
+cleanup_policy:
+  owner: operator
+  cadence: after-each-wave
+  retain_in_review_until_integrated: true
+  preserve_on_control_plane_failure: true
+  include_snapshot_repos: true
+  storage_watchlist:
+    - git-worktrees
+    - snapshot-repos
+    - browser-screenshots
+    - traces
+    - build-artifacts
+    - dependency-trees
+  repo_specific_hotspots:
+    - "<fill-in: local caches, generated assets, or large directories unique to this repo>"
+
+# Whether the agent should ask the user before routing an ambiguous ticket.
+ask_on_ambiguous_tickets: true
