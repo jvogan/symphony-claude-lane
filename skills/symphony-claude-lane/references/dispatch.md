@@ -63,4 +63,4 @@ When documenting dispatch and operations, account for:
 - browser screenshots, traces, and other QA artifacts
 - build outputs, dependency trees, and repo-specific local caches
 
-The adopter repo should name who cleans these up, when they are eligible for removal, and what stays retained until integration is complete.
+The adopter repo should name who cleans these up, when they are eligible for removal, what stays retained until integration is complete, and how integration is verified before artifacts are removed.

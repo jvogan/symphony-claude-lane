@@ -91,3 +91,20 @@ Recommended response:
 - batch cleanup for larger campaigns instead of assuming one-shot reconciliation will always succeed
 - watch disk usage during bigger waves and clean terminal artifacts promptly
 - inspect repo-specific hotspots such as caches, generated assets, traces, or snapshot directories instead of looking only at worktrees
+
+## Premature cleanup
+
+Symptoms:
+
+- a worktree is deleted but the branch was never merged
+- an issue reached `Done` but the changes are not on the target branch or in the snapshot repo
+- an operator or automation removed artifacts based on issue state alone without checking integration
+
+Recommended response:
+
+- verify that the branch was merged or promoted before removing any worktree, even for Done issues
+- if the branch still exists unmerged, treat the worktree as still needed
+- add an integration verification step to the cleanup automation or operator checklist
+- for snapshot workflows, confirm the promotion marker exists and the expected files are present
+- if work was lost, check whether the worktree or branch can be recovered from git reflog or backup
+- tighten the lane contract to require integration checks, not just terminal-state checks, before cleanup

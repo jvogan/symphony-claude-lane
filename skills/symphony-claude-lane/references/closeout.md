@@ -38,6 +38,20 @@ If the lane cannot confirm issue state because the tracker is unavailable, rate-
 - stop in `In Review` or an equivalent non-terminal review state
 - leave a clear operator note describing what could not be verified
 
+## Integration verification before cleanup
+
+Terminal issue state is necessary but **not sufficient** for cleanup. An issue can reach `Done` without its changes being integrated — the operator may have moved it prematurely, self-close may have fired before the branch was merged, or snapshot promotion may have failed silently.
+
+Before removing a worktree or its artifacts, verify that the work was actually integrated:
+
+- **Branch-based workflows**: confirm the branch was merged or the PR was closed-as-merged. If the branch still exists unmerged, the work may not be on the target branch even if the issue is Done.
+- **Snapshot-based workflows**: confirm the changes were promoted into the snapshot repo. If the promotion marker is missing or the snapshot does not contain the expected files, the work is not integrated.
+- **PR-based workflows**: confirm the PR was merged, not just closed.
+
+If integration cannot be confirmed, treat the worktree as still needed regardless of issue state. Leave a clear operator note and escalate rather than deleting.
+
+The lane contract should define which integration check applies to the adopter's workflow and who is responsible for running it.
+
 ## Storage and retention
 
 Worktrees, snapshot repos, and run artifacts are a real operational cost, not just incidental scratch space.
@@ -46,7 +60,7 @@ For many frontend or JavaScript-heavy repos, a single worktree can be large once
 
 The lane contract should therefore define:
 
-- when terminal-state worktrees are eligible for removal
+- when terminal-state worktrees are eligible for removal, **and how integration is verified first**
 - when snapshots or promotion directories are eligible for removal
 - who is responsible for cleanup after each wave or campaign
 - whether `In Review` artifacts are retained until final integration
@@ -76,4 +90,4 @@ Document how the adopter should handle:
 
 The lane contract should explicitly say whether the retried worker reuses the same branch, same worktree, or a fresh one.
 
-If manual cleanup is ever needed, require a human or orchestrator to confirm the issue is truly terminal before deleting artifacts.
+If manual cleanup is ever needed, require a human or orchestrator to confirm the issue is truly terminal **and that the work was integrated** before deleting artifacts.

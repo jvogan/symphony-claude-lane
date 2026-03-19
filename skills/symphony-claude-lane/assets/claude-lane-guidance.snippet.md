@@ -40,7 +40,8 @@ Closeout:
 Cleanup:
 
 - Cleanup is part of the lane contract, not an implicit side effect.
-- Only remove worktrees or run artifacts after terminal issue state is confirmed.
+- Terminal issue state is necessary but not sufficient for cleanup. Before removing a worktree, verify the work was actually integrated (branch merged, PR merged, or snapshot promoted). An issue can reach `Done` without its changes being on the target branch.
+- If the branch still exists unmerged or the snapshot promotion marker is missing, treat the worktree as still needed regardless of issue state.
 - If cleanup automation depends on tracker state and the tracker is unavailable, fail closed and retry later.
 - Worktrees and snapshot repos are often the main disk cost in the lane; monitor storage during larger waves and clean terminal artifacts promptly.
 - Check repo-specific hotspots such as caches, generated assets, screenshots, traces, or dependency trees instead of assuming every adopter accumulates space the same way.

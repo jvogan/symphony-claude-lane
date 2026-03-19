@@ -76,6 +76,14 @@ cleanup_policy:
   retain_in_review_until_integrated: true
   preserve_on_control_plane_failure: true
   include_snapshot_repos: true
+  # Terminal issue state alone is not enough. Verify the work was actually
+  # integrated before removing worktrees or artifacts.
+  verify_integration_before_cleanup: true
+  # How integration is checked depends on the adopter's workflow.
+  # branch-merged: confirm the branch or PR was merged into the target branch.
+  # snapshot-promoted: confirm changes were promoted into the snapshot repo.
+  # pr-merged: confirm the PR was merged, not just closed.
+  integration_check: branch-merged
   storage_watchlist:
     - git-worktrees
     - snapshot-repos
