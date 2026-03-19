@@ -134,11 +134,16 @@ Adopters should treat cleanup as part of the lane design:
 - make sure cleanup fails closed when tracker state cannot be confirmed
 - record repo-specific storage hotspots in the routing profile
 
+## Related
+
+- **[symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter)** — The base orchestration skill for Symphony + Linear, with self-improving runbooks, bootstrap scripts, and issue contracts
+
 ## Links
 
 - [OpenAI Symphony](https://github.com/openai/symphony) — the orchestrator this skill extends
 - [Linear](https://linear.app) — issue tracker used for routing and state
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — the agent runtime for the Claude lane
+- [Codex](https://openai.com/index/codex/) — the primary worker runtime in the Codex lane
 - [Agent Skills spec](https://agentskills.io/specification) — the open standard this skill follows
 
 ## License
