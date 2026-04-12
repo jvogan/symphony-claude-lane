@@ -3,7 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Agent Skill](https://img.shields.io/badge/Agent_Skill-v1.0.0-8A2BE2.svg)](#install)
 
-A portable skill for adding a **Claude Code lane** to an existing **OpenAI Symphony + Linear** workflow.
+![Symphony + Claude Lane](assets/social-preview.png)
+
+**Add Claude Code as a specialist worker lane in your Symphony + Linear workflow.**
+
+If you already run [Codex](https://openai.com/index/codex/) workers through [Symphony](https://github.com/openai/symphony) and [Linear](https://linear.app), this [agent skill](https://agentskills.io/specification) lets you bring in [Claude Code](https://docs.anthropic.com/en/docs/claude-code) for work that benefits from visual judgment, browser verification, or design sensibility — without disrupting your existing Codex pipeline.
+
+You install the skill, point it at a repo, and your agent sets up a routing profile that defines what Claude owns, what stays in Codex, and how the two lanes coordinate through Linear.
 
 ```
                          Linear (issues & state)
@@ -18,15 +24,19 @@ A portable skill for adding a **Claude Code lane** to an existing **OpenAI Symph
             types & migrations                   skeptical review
 ```
 
-## How it works
+## Why two lanes?
 
-1. Point an agent at a repo that already uses Symphony + Linear.
-2. The skill inspects the repo and confirms it is a mixed-lane candidate.
-3. It asks you what Claude should own — default is UI-first.
-4. It creates a routing profile (`.orchestration/claude-lane.yaml`) in your repo.
-5. It documents the lane contract so both human operators and agents know which tickets go where.
+Different AI agents have different strengths. Codex is fast and excels at bounded implementation tasks in a sandbox. Claude Code has visual judgment, can run a browser via Playwright to verify frontend changes, and handles design-sensitive or copy-heavy work where tone and aesthetics matter. Running both against the same Linear backlog — each claiming tickets that match its strengths — gives you better output than either alone.
 
-The default stance is intentionally narrow: Claude starts as a specialist, not a second general-purpose scheduler. Expand the lane with evidence, not assumptions.
+## Prerequisites
+
+Before installing, make sure you have:
+
+- An **existing Symphony + Linear workflow** (see [symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter) if you need to set one up)
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** installed (the runtime for the Claude lane)
+- **[Linear](https://linear.app)** account with an API key (`LINEAR_API_KEY` in your environment)
+- **[Playwright](https://playwright.dev/)** or equivalent browser automation for visual verification
+- A target git repo that already has Symphony orchestration configured
 
 ## Install
 
@@ -35,6 +45,8 @@ The default stance is intentionally narrow: Claude starts as a specialist, not a
 ```bash
 npx skills add jvogan/symphony-claude-lane
 ```
+
+This clones the skill into your local skills directory (e.g. `~/.codex/skills/`) so your agent can discover it.
 
 ### Codex (manual)
 
@@ -47,21 +59,47 @@ Restart Codex after installing so the skill is discoverable.
 
 ### Claude Code (manual)
 
-Point Claude Code at:
+Add the skill as a context reference in your project's `CLAUDE.md`:
 
-```text
-skills/symphony-claude-lane/SKILL.md
+```markdown
+<!-- In your project's CLAUDE.md -->
+See @skills/symphony-claude-lane/SKILL.md for Claude lane orchestration.
 ```
 
-You can also copy the skill folder into a shared skills location if your Claude setup supports that pattern.
+Or copy the skill folder into your project and reference `skills/symphony-claude-lane/SKILL.md` directly from your agent instructions.
+
+## How it works
+
+1. Point an agent at a repo that already uses Symphony + Linear.
+2. The skill inspects the repo and confirms it is a mixed-lane candidate.
+3. It confirms the base workflow has bootstrap assertions and a no-progress stop-loss before expanding.
+4. It asks you what Claude should own — default is UI-first.
+5. It creates a routing profile (`.orchestration/claude-lane.yaml`) in your repo.
+6. It documents the lane contract so both human operators and agents know which tickets go where.
+
+The default stance is intentionally narrow: Claude starts as a specialist, not a second general-purpose scheduler. Expand the lane with evidence, not assumptions.
 
 ## Example prompts
 
-- `Use $symphony-claude-lane to add a Claude lane to this Symphony + Linear repo for UI and browser-verified work.`
-- `Use $symphony-claude-lane to define what work belongs to Claude versus Codex, then persist the decision into a repo-local routing profile.`
-- `Use $symphony-claude-lane to keep one Linear project but add exact-match Claude lane labels and mixed-lane guidance to this repo.`
-- `Use $symphony-claude-lane to keep Claude UI-only for now and document the lane contract.`
-- `Use $symphony-claude-lane to extend the default Claude lane so it also owns docs and review work.`
+```
+Use $symphony-claude-lane to add a Claude lane to this Symphony + Linear repo
+for UI and browser-verified work.
+```
+```
+Use $symphony-claude-lane to define what work belongs to Claude versus Codex,
+then persist the decision into a repo-local routing profile.
+```
+```
+Use $symphony-claude-lane to keep one Linear project but add exact-match Claude
+lane labels and mixed-lane guidance to this repo.
+```
+```
+Use $symphony-claude-lane to keep Claude UI-only for now and document the lane contract.
+```
+```
+Use $symphony-claude-lane to extend the default Claude lane so it also owns
+docs and review work.
+```
 
 ## What the skill produces
 
@@ -141,15 +179,17 @@ Adopters should treat cleanup as part of the lane design:
 
 ## Related
 
-- **[symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter)** — The base orchestration skill for Symphony + Linear, with self-improving runbooks, bootstrap scripts, and issue contracts
+- **[symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter)** — The base orchestration skill for Symphony + Linear, with self-improving runbooks, bootstrap scripts, and issue contracts. Install this first if you don't have Symphony + Linear set up yet.
 
 ## Links
 
-- [OpenAI Symphony](https://github.com/openai/symphony) — the orchestrator this skill extends
+- [OpenAI Symphony](https://github.com/openai/symphony) — the dispatch and isolation runtime
 - [Linear](https://linear.app) — issue tracker used for routing and state
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — the agent runtime for the Claude lane
 - [Codex](https://openai.com/index/codex/) — the primary worker runtime in the Codex lane
 - [Agent Skills spec](https://agentskills.io/specification) — the open standard this skill follows
+
+Contributions and feedback welcome via [GitHub issues](https://github.com/jvogan/symphony-claude-lane/issues).
 
 ## License
 

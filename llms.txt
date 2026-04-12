@@ -1,25 +1,30 @@
 # Symphony + Claude Lane
 
-> A portable skill for adding a specialized Claude Code lane to an existing OpenAI Symphony + Linear workflow.
+> An installable agent skill that adds Claude Code as a specialist worker lane alongside Codex in an existing OpenAI Symphony + Linear workflow.
 
-## What this repo is
+## What this is
 
-This repo teaches an agent how to introduce a Claude lane into a mixed-lane delivery system where Symphony handles worker orchestration and Linear holds issue planning and state.
+A skill you install into an AI coding agent (Codex or Claude Code) to set up a mixed-lane orchestration system. Once installed, your agent can decide what work belongs to Claude versus Codex, create a durable routing profile in the target repo, and define visual verification, privacy, and closeout rules for the Claude lane.
 
-The default Claude lane is intentionally narrow:
+## Who this is for
 
-- UI and UX implementation that benefits from visual judgment
-- browser-verified frontend changes
-- product copy and higher-touch writing
-- review-oriented or skeptical follow-up work
+Developers and operators who already run Symphony + Linear with Codex workers and want to bring in Claude Code for work that benefits from visual judgment, browser verification, or design sensibility — UI implementation, frontend polish, product copy, and review work.
 
-The skill also teaches the agent to ask the adopter whether Claude should own any additional areas, then persist those answers into a repo-local routing profile.
-If the adopter does not answer, the skill keeps Claude narrow and records that assumption explicitly.
-The routing profile also captures queue strategy, inherited guardrails, privacy rules, and cleanup or retention rules so the lane accounts for that adopter's actual storage footprint, including worktrees, snapshots, and any repo-specific hotspots.
+## Why two lanes?
+
+Different AI agents have different strengths. Codex is fast and excels at bounded implementation in a sandbox. Claude Code has visual judgment, can verify frontend changes via Playwright, and handles design-sensitive work where tone and aesthetics matter. Running both against the same backlog — each claiming tickets that match its strengths — produces better output than either alone.
+
+## Key concepts
+
+- **Claude Lane**: A specialist worker lane for Claude Code, default-scoped to UI/UX, design, browser-verified work, product copy, and review.
+- **Codex Lane**: The existing Symphony worker lane for implementation, refactors, infra, CI, types, and migrations.
+- **Routing Profile**: A repo-local YAML file (`.orchestration/claude-lane.yaml`) that records what Claude owns, queue strategy, privacy rules, guardrails, and cleanup policy.
+- **Visual Verification**: Playwright-first browser verification for frontend tickets before closeout.
+- **Lane Labels**: Exact-match Linear labels that route tickets to Claude or Codex within the same project.
 
 ## Default workflow
 
-Inspect repo -> confirm mixed-lane candidate -> confirm the base Symphony workflow already has bootstrap assertions and a no-progress stop-loss -> ask adopter what Claude should own -> fall back to UI-first if unanswered -> create or update `.orchestration/claude-lane.yaml` including queue strategy, privacy rules, and retention policy -> prefer same-project label routing unless stronger separation is needed -> document lane contract -> use Playwright for visual verification -> apply safe closeout and cleanup rules
+Inspect repo -> confirm mixed-lane candidate -> confirm the base Symphony workflow has bootstrap assertions and a no-progress stop-loss -> ask adopter what Claude should own -> fall back to UI-first if unanswered -> create or update `.orchestration/claude-lane.yaml` including queue strategy, privacy rules, and retention policy -> prefer same-project label routing unless stronger separation is needed -> document lane contract -> use Playwright for visual verification -> apply safe closeout and cleanup rules
 
 ## Repo structure
 
@@ -27,23 +32,27 @@ Inspect repo -> confirm mixed-lane candidate -> confirm the base Symphony workfl
 - `skills/symphony-claude-lane/agents/openai.yaml` — skill UI metadata
 - `skills/symphony-claude-lane/references/setup.md` — prerequisites and candidate checks
 - `skills/symphony-claude-lane/references/routing.md` — routing defaults, extension questions, persisted profile contract
-- `skills/symphony-claude-lane/references/dispatch.md` — queue split, separate Claude project, worker lifecycle
+- `skills/symphony-claude-lane/references/dispatch.md` — queue split, worker lifecycle, label routing
 - `skills/symphony-claude-lane/references/visual-verification.md` — Playwright-first browser verification guidance
-- `skills/symphony-claude-lane/references/closeout.md` — outcome blocks, `In Review`, retries, self-close rules
+- `skills/symphony-claude-lane/references/closeout.md` — outcome blocks, In Review, retries, self-close rules
 - `skills/symphony-claude-lane/references/troubleshooting.md` — common mixed-lane failure modes
 - `skills/symphony-claude-lane/references/examples.md` — concrete ticket-routing examples
-- `skills/symphony-claude-lane/assets/claude-lane-profile.example.yaml` — example routing profile and cleanup policy adopters should copy into their repo
-- `skills/symphony-claude-lane/assets/claude-lane-guidance.snippet.md` — starter guidance adopters can drop into repo-local docs
+- `skills/symphony-claude-lane/assets/claude-lane-profile.example.yaml` — example routing profile adopters copy into their repo
+- `skills/symphony-claude-lane/assets/claude-lane-guidance.snippet.md` — starter guidance for adopter repo orchestration docs
 - `skills/symphony-claude-lane/assets/worker-prompt.template.md` — reusable worker prompt template
 - `skills/symphony-claude-lane/assets/linear-outcome-block.example.md` — example structured closeout comments
 
-## Usage
+## Install
 
-Install the skill into Codex or point Claude Code at `skills/symphony-claude-lane/SKILL.md`. Then ask the agent to add a Claude lane to a Symphony + Linear repo, keeping the default lane UI-first unless the adopter wants Claude to own more.
+```bash
+npx skills add jvogan/symphony-claude-lane
+```
 
-## What this repo does not include
+Or copy `skills/symphony-claude-lane/` into your Codex skills directory or reference `SKILL.md` from Claude Code.
 
-No machine-specific launcher scripts, no env wrappers, no watchdog, and no universal worker runtime. This is a portable blueprint meant to be adapted into local orchestration stacks, with safe defaults for closeout and cleanup when tracker state is unavailable.
+## Prerequisites
+
+Requires an existing Symphony + Linear workflow. See [symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter) to set one up.
 
 ## License
 
