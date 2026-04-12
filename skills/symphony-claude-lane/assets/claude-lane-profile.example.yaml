@@ -1,50 +1,69 @@
 # Copy this file into the adopter repo as `.orchestration/claude-lane.yaml`
-# and edit it to match the repo's actual mixed-lane policy.
+# and edit it to match the repo's actual routing policy.
 
-schema_version: 1
+schema_version: 2
 
-# Keep the lane inside the same Linear control plane by default.
+# Routing strategy.
+# - task-characteristic: orchestrator analyzes each task and picks the best model.
+#   Labels serve as overrides.
+# - label-only: routing is determined entirely by Linear labels.
+routing_strategy: task-characteristic
+
+# For Claude-only setups (no Codex), set this to true.
+# All tasks route to Claude regardless of characteristics.
+claude_only: false
+
+# Keep the routing inside the same Linear control plane by default.
 # Options:
 # - shared-project-labels
 # - separate-project
 queue_strategy: shared-project-labels
 
-# Default lane stance for Claude. Start narrow, expand with evidence.
-default_lane_mode: ui-first-extensible
+# --- Model selection criteria ---
+# These guide the orchestrator when routing_strategy is task-characteristic.
 
-# Work types Claude owns by default.
-claude_focus_areas:
-  - ui
-  - ux
-  - design
-  - browser-verification
-  - copy
-  - review
+# Route to Claude when a task has any of these characteristics.
+prefer_claude_when:
+  - requires_browser_verification
+  - requires_visual_judgment
+  - requires_external_tools
+  - requires_deep_reasoning
+  - involves_security_review
+  - involves_documentation
+  - involves_code_review
+  - involves_product_copy
+  - breaks_in_sandbox
 
-# Areas the adopter may explicitly add later.
-optional_claude_focus_areas:
-  - docs
-  - release-notes
-  - e2e
-  - research
-  - issue-shaping
+# Route to Codex when a task has any of these characteristics.
+prefer_codex_when:
+  - bounded_implementation
+  - sandbox_compatible
+  - parallelizable_batch
+  - config_or_schema_changes
+  - test_infrastructure
+  - mechanical_refactor
 
-# Labels that should route to Claude even if the summary is ambiguous.
-# These should coexist with model or complexity labels from the base Symphony workflow.
-always_route_labels:
+# --- Label overrides ---
+# These take priority over task-characteristic analysis.
+
+# Labels that always route to Claude regardless of analysis.
+always_route_to_claude:
   - lane:claude
   - kind:ui
   - kind:ux
   - kind:design
   - kind:copy
+  - kind:review
+  - kind:security-review
+  - kind:docs
 
-# Labels that should stay out of the Claude lane by default.
-never_route_labels:
+# Labels that always route to Codex regardless of analysis.
+always_route_to_codex:
+  - lane:codex
   - kind:infra
   - kind:ci
   - kind:types
   - kind:migration
-  - kind:refactor
 
 # Visual verification policy for tickets that affect rendered output.
 visual_verification_required:
@@ -59,15 +78,14 @@ visual_verification_required:
     - pages/
     - components/
 
-# Preferred Claude models by work type. Keep values generic unless the adopter
-# has a stricter local model policy.
+# Preferred Claude models by work type.
 preferred_models:
   default: opus
   lighter_weight:
     - sonnet
 
-# The Claude lane should inherit the base workflow guardrails rather than
-# pretending browser work is exempt from them.
+# The routing should inherit the base workflow guardrails rather than
+# treating any model's tasks as exempt from them.
 base_workflow_guardrails:
   workspace_bootstrap_assertions: true
   no_progress_stop_loss: true
@@ -79,8 +97,7 @@ privacy_rules:
   redact_screenshots_and_traces: true
   avoid_raw_customer_payloads: true
 
-# Default closeout policy. Use `in-review` unless the adopter has a proven,
-# safe self-close workflow.
+# Default closeout policy.
 closeout_mode:
   default: in-review
   on_control_plane_failure: preserve-artifacts
@@ -88,21 +105,14 @@ closeout_mode:
     - direct-branch
     - direct-pr
 
-# Cleanup and retention policy. Fill this in for the adopter's actual storage
-# footprint rather than assuming worktrees are the only cost.
+# Cleanup and retention policy.
 cleanup_policy:
   owner: operator
   cadence: after-each-wave
   retain_in_review_until_integrated: true
   preserve_on_control_plane_failure: true
   include_snapshot_repos: true
-  # Terminal issue state alone is not enough. Verify the work was actually
-  # integrated before removing worktrees or artifacts.
   verify_integration_before_cleanup: true
-  # How integration is checked depends on the adopter's workflow.
-  # branch-merged: confirm the branch or PR was merged into the target branch.
-  # snapshot-promoted: confirm changes were promoted into the snapshot repo.
-  # pr-merged: confirm the PR was merged, not just closed.
   integration_check: branch-merged
   storage_watchlist:
     - git-worktrees

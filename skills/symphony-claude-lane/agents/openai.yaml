@@ -1,7 +1,7 @@
 interface:
   display_name: "Symphony + Claude Lane"
-  short_description: "Add a Claude specialist lane to Symphony"
-  default_prompt: "Use $symphony-claude-lane to add a UI-first but extensible Claude lane to this Symphony + Linear repo, prefer label-filtered routing in the existing Linear control plane, persist the routing profile, and document safe closeout plus privacy behavior."
+  short_description: "Smart multi-model dispatch for Symphony + Linear"
+  default_prompt: "Use $symphony-claude-lane to set up smart multi-model routing for this Symphony + Linear repo — analyze task characteristics to pick the right agent (Claude or Codex) for each issue, persist the routing profile, and document closeout, privacy, and model selection behavior."
 dependencies:
   tools:
     - type: "mcp"

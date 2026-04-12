@@ -1,13 +1,13 @@
 {
   "name": "symphony-claude-lane",
   "metadata": {
-    "description": "A portable skill for adding a specialized Claude Code lane to an existing OpenAI Symphony + Linear workflow.",
+    "description": "Smart multi-model dispatch for OpenAI Symphony + Linear workflows. Route tasks to Claude Code or Codex based on task characteristics.",
     "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "symphony-claude-lane",
-      "description": "Add a Claude specialist lane to Symphony + Linear workflows for UI, design, browser-verified, and review work.",
+      "description": "Smart multi-model dispatch for Symphony + Linear. Route tasks to the right agent based on what the work requires.",
       "source": "./",
       "strict": false,
       "skills": [

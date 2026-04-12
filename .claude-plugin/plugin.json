@@ -1,6 +1,6 @@
 {
   "name": "symphony-claude-lane",
-  "description": "Add a specialized Claude Code lane to an existing OpenAI Symphony + Linear workflow for UI, design, browser-verified, and review work.",
+  "description": "Smart multi-model dispatch for OpenAI Symphony + Linear workflows. Route tasks to Claude Code or Codex based on what each task requires.",
   "version": "1.0.0",
   "author": {
     "name": "Contributors"

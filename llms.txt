@@ -1,43 +1,60 @@
 # Symphony + Claude Lane
 
-> An installable agent skill that adds Claude Code as a specialist worker lane alongside Codex in an existing OpenAI Symphony + Linear workflow.
+> An installable agent skill that teaches an orchestrator smart multi-model dispatch for OpenAI Symphony + Linear workflows — routing tasks to Claude Code or Codex based on what each task requires.
 
 ## What this is
 
-A skill you install into an AI coding agent (Codex or Claude Code) to set up a mixed-lane orchestration system. Once installed, your agent can decide what work belongs to Claude versus Codex, create a durable routing profile in the target repo, and define visual verification, privacy, and closeout rules for the Claude lane.
+A skill you install into an AI coding agent (Codex or Claude Code) to set up intelligent task routing. Once installed, your agent can analyze each issue's characteristics, pick the best model for the job, create a durable routing profile in the target repo, and define visual verification, privacy, and closeout rules for multi-model execution. Also supports Claude-only setups without Codex.
 
 ## Who this is for
 
-Developers and operators who already run Symphony + Linear with Codex workers and want to bring in Claude Code for work that benefits from visual judgment, browser verification, or design sensibility — UI implementation, frontend polish, product copy, and review work.
+Developers and operators who run Symphony + Linear and want their orchestrator to pick the right agent for each task — Claude Code for work requiring visual judgment, deep reasoning, browser verification, security review, or external tools; Codex for fast, bounded, sandbox-compatible implementation. Also for teams that want Claude-only workers against Linear issues.
 
-## Why two lanes?
+## Why smart model selection?
 
-Different AI agents have different strengths. Codex is fast and excels at bounded implementation in a sandbox. Claude Code has visual judgment, can verify frontend changes via Playwright, and handles design-sensitive work where tone and aesthetics matter. Running both against the same backlog — each claiming tickets that match its strengths — produces better output than either alone.
+Different AI agents have different strengths. Claude Code excels at visual judgment, deep reasoning, browser verification, external tool access, code review, documentation, and security analysis. Codex excels at fast bounded implementation, parallel execution, sandbox-compatible tasks, and mechanical refactors. Routing each task to the model best suited for it produces better output than using either alone.
 
 ## Key concepts
 
-- **Claude Lane**: A specialist worker lane for Claude Code, default-scoped to UI/UX, design, browser-verified work, product copy, and review.
-- **Codex Lane**: The existing Symphony worker lane for implementation, refactors, infra, CI, types, and migrations.
-- **Routing Profile**: A repo-local YAML file (`.orchestration/claude-lane.yaml`) that records what Claude owns, queue strategy, privacy rules, guardrails, and cleanup policy.
-- **Visual Verification**: Playwright-first browser verification for frontend tickets before closeout.
-- **Lane Labels**: Exact-match Linear labels that route tickets to Claude or Codex within the same project.
+- **Task-Characteristic Routing**: The orchestrator analyzes each issue and picks the best model based on what the task requires. Labels serve as overrides.
+- **Label-Only Routing**: Alternative strategy where routing is determined entirely by Linear labels. Simpler but less adaptive.
+- **Claude-Only Mode**: For teams without Codex. All tasks route to Claude. The dispatch contract still applies.
+- **Routing Profile**: A repo-local YAML file (`.orchestration/claude-lane.yaml`) that records model selection criteria, label overrides, privacy rules, guardrails, and cleanup policy.
+- **Visual Verification**: Playwright-first browser verification for tickets affecting rendered output.
+
+## When to prefer Claude
+
+- Requires browser verification or visual judgment
+- Requires deep reasoning (architecture, complex debugging)
+- Requires external tools (MCP servers, APIs, databases)
+- Involves security review, code review, or documentation
+- Involves product copy or technical writing
+- Breaks in Codex sandbox (E2E tests, integration tests)
+
+## When to prefer Codex
+
+- Bounded implementation with clear acceptance criteria
+- Sandbox-compatible (no network, browser, or system access needed)
+- Parallelizable batch of similar tasks
+- Config, schema, type, or migration changes
+- Test infrastructure or mechanical refactors
 
 ## Default workflow
 
-Inspect repo -> confirm mixed-lane candidate -> confirm the base Symphony workflow has bootstrap assertions and a no-progress stop-loss -> ask adopter what Claude should own -> fall back to UI-first if unanswered -> create or update `.orchestration/claude-lane.yaml` including queue strategy, privacy rules, and retention policy -> prefer same-project label routing unless stronger separation is needed -> document lane contract -> use Playwright for visual verification -> apply safe closeout and cleanup rules
+Inspect repo -> confirm multi-model candidate -> confirm base workflow has guardrails -> analyze work patterns -> ask adopter about routing preferences -> create or update `.orchestration/claude-lane.yaml` with routing strategy, model selection criteria, privacy rules, and retention policy -> prefer same-project label routing unless stronger separation is needed -> document routing contract -> use Playwright for visual verification -> apply safe closeout and cleanup rules
 
 ## Repo structure
 
 - `skills/symphony-claude-lane/SKILL.md` — main skill definition
 - `skills/symphony-claude-lane/agents/openai.yaml` — skill UI metadata
 - `skills/symphony-claude-lane/references/setup.md` — prerequisites and candidate checks
-- `skills/symphony-claude-lane/references/routing.md` — routing defaults, extension questions, persisted profile contract
-- `skills/symphony-claude-lane/references/dispatch.md` — queue split, worker lifecycle, label routing
+- `skills/symphony-claude-lane/references/routing.md` — routing strategies, model selection criteria, adopter questions
+- `skills/symphony-claude-lane/references/dispatch.md` — model selection algorithm, queue split, worker lifecycle
 - `skills/symphony-claude-lane/references/visual-verification.md` — Playwright-first browser verification guidance
 - `skills/symphony-claude-lane/references/closeout.md` — outcome blocks, In Review, retries, self-close rules
-- `skills/symphony-claude-lane/references/troubleshooting.md` — common mixed-lane failure modes
-- `skills/symphony-claude-lane/references/examples.md` — concrete ticket-routing examples
-- `skills/symphony-claude-lane/assets/claude-lane-profile.example.yaml` — example routing profile adopters copy into their repo
+- `skills/symphony-claude-lane/references/troubleshooting.md` — common failure modes
+- `skills/symphony-claude-lane/references/examples.md` — concrete routing examples across task types
+- `skills/symphony-claude-lane/assets/claude-lane-profile.example.yaml` — example routing profile with model selection criteria
 - `skills/symphony-claude-lane/assets/claude-lane-guidance.snippet.md` — starter guidance for adopter repo orchestration docs
 - `skills/symphony-claude-lane/assets/worker-prompt.template.md` — reusable worker prompt template
 - `skills/symphony-claude-lane/assets/linear-outcome-block.example.md` — example structured closeout comments
