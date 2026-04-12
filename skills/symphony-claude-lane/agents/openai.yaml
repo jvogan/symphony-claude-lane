@@ -1,7 +1,7 @@
 interface:
   display_name: "Symphony + Claude Lane"
   short_description: "Add a Claude specialist lane to Symphony"
-  default_prompt: "Use $symphony-claude-lane to add a UI-first but extensible Claude lane to this Symphony + Linear repo, persist the routing profile, and document safe closeout behavior."
+  default_prompt: "Use $symphony-claude-lane to add a UI-first but extensible Claude lane to this Symphony + Linear repo, prefer label-filtered routing in the existing Linear control plane, persist the routing profile, and document safe closeout plus privacy behavior."
 dependencies:
   tools:
     - type: "mcp"

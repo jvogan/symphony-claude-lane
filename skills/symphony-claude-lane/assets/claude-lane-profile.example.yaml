@@ -3,6 +3,12 @@
 
 schema_version: 1
 
+# Keep the lane inside the same Linear control plane by default.
+# Options:
+# - shared-project-labels
+# - separate-project
+queue_strategy: shared-project-labels
+
 # Default lane stance for Claude. Start narrow, expand with evidence.
 default_lane_mode: ui-first-extensible
 
@@ -24,6 +30,7 @@ optional_claude_focus_areas:
   - issue-shaping
 
 # Labels that should route to Claude even if the summary is ambiguous.
+# These should coexist with model or complexity labels from the base Symphony workflow.
 always_route_labels:
   - lane:claude
   - kind:ui
@@ -58,6 +65,19 @@ preferred_models:
   default: opus
   lighter_weight:
     - sonnet
+
+# The Claude lane should inherit the base workflow guardrails rather than
+# pretending browser work is exempt from them.
+base_workflow_guardrails:
+  workspace_bootstrap_assertions: true
+  no_progress_stop_loss: true
+  canonical_issue_contract: true
+
+# Keep sensitive data out of queue state, comments, screenshots, and traces.
+privacy_rules:
+  redact_issue_bodies_and_comments: true
+  redact_screenshots_and_traces: true
+  avoid_raw_customer_payloads: true
 
 # Default closeout policy. Use `in-review` unless the adopter has a proven,
 # safe self-close workflow.

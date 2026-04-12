@@ -4,21 +4,24 @@ Use this reference when defining how the Claude lane enters a mixed Symphony wor
 
 ## Queue split
 
-Use a **separate active queue** for the Claude lane.
+Use a **distinct active queue contract** for the Claude lane.
 
 Recommended patterns:
 
-- separate Linear project for Claude-lane issues
-- separate labels such as `lane:claude`
+- one Linear project with exact-match lane labels such as `lane:claude`
+- separate Symphony or Claude claimers that filter on those labels
 - separate reporting or review filter for Claude outcomes
+- separate Linear project for Claude-lane issues only when the adopter needs stronger operational separation
 
-Avoid a shared active queue where Claude and Codex claim from the same unstructured pool.
+Avoid a shared active queue where Claude and Codex claim from the same unstructured pool without exact routing filters.
+
+Lane labels should coexist with the base workflow's model or complexity labels rather than replacing them.
 
 ## Worker lifecycle
 
 At a high level, the Claude lane should follow:
 
-1. Select a Claude-owned ticket from the separate queue
+1. Select a Claude-owned ticket from the Claude-routed queue
 2. Work in an isolated branch or worktree
 3. Follow repo guidance and acceptance criteria
 4. Run validation
@@ -26,6 +29,18 @@ At a high level, the Claude lane should follow:
 6. Post a structured outcome
 7. Move to `In Review` or `Done`, depending on the repo's closeout model
 8. Clean terminal-state worktrees, snapshots, and other lane artifacts according to the repo-local retention policy
+
+## Inherited base guardrails
+
+The Claude lane should inherit the same run-quality floor as the main Symphony workflow.
+
+At minimum, the adopter should already have:
+
+- workspace bootstrap assertions for branch and repo-anchor paths
+- a no-progress stop-loss that requeues obviously stuck work
+- a stable issue contract with acceptance criteria, validation commands, and touched areas
+
+If those are still broken in the main workflow, fix them before scaling the Claude lane.
 
 ## Ticket shape expectations
 
@@ -38,6 +53,7 @@ Each ticket should ideally include:
 - validation commands
 - touched areas
 - any visual surfaces that must be checked
+- any privacy constraints on screenshots, traces, or customer-facing data
 
 Claude does not replace issue discipline. It benefits from it.
 

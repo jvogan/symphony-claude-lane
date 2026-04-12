@@ -41,6 +41,12 @@ The worker or orchestrator should record enough evidence to support review:
 - whether the ticket passed both desktop and mobile checks
 - any skipped verification and why
 
+Keep that evidence privacy-safe:
+
+- avoid capturing secrets, tokens, cookies, personal data, or raw customer payloads when a redacted environment is available
+- redact screenshots or traces before sharing them in issue comments or review docs
+- prefer synthetic or staging data over production data for verification
+
 ## Fallback rule
 
 If the dev server cannot start or browser tools are unavailable, do not fake confidence. Note the skipped verification explicitly in the structured outcome or review comment.

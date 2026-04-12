@@ -38,6 +38,7 @@ Persist that change in the routing profile rather than relying on a one-off chat
 ## Example user questions to ask
 
 - Do you want Claude to stay UI-focused, or should it also own docs and review work?
+- Do you want the Claude lane to stay in the same Linear project with label filters, or should it use a separate project?
 - Which labels should always route to Claude?
 - Which labels should never route to Claude?
 - Should all UI tickets require Playwright verification, or only higher-risk surfaces?
@@ -48,6 +49,7 @@ Persist that change in the routing profile rather than relying on a one-off chat
 If the user is unavailable or does not want to decide yet:
 
 - keep Claude UI, UX, design, browser verification, copy, and review only
+- keep same-project label routing unless the repo proves it needs stronger isolation
 - keep docs, research, and E2E outside the lane for now
 - require `In Review` before `Done`
 - write those assumptions into `.orchestration/claude-lane.yaml` and the repo guidance so they are easy to revise later

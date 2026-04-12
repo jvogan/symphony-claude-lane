@@ -21,15 +21,23 @@ Default Codex ownership:
 Routing policy:
 
 - Read `.orchestration/claude-lane.yaml` before routing ambiguous tickets.
+- Prefer one Linear project with explicit lane labels unless the repo has a strong reason to split projects.
 - If the user has not broadened the lane, keep Claude UI-first.
 - If a ticket is ambiguous and the routing profile says to ask, ask before routing.
 - If a ticket expands beyond the Claude-owned scope mid-run, stop and hand it back for rerouting.
+- Claude lane labels should coexist with the base workflow's model or complexity labels rather than replacing them.
 
 Visual verification:
 
 - Tickets that affect rendered output must use the configured browser automation path before closeout.
 - Capture both desktop and mobile evidence when the surface supports both.
+- Do not capture or persist secrets, personal data, or raw customer payloads in screenshots or traces when a redacted path is available.
 - If visual verification cannot be completed, record that explicitly and stop in `In Review`.
+
+Base guardrails:
+
+- The Claude lane should inherit the base workflow's workspace bootstrap assertions and no-progress stop-loss.
+- If the base workflow is still failing on bad checkouts or burning tokens with no workspace diff, fix that first before expanding Claude ownership.
 
 Closeout:
 
@@ -45,3 +53,8 @@ Cleanup:
 - If cleanup automation depends on tracker state and the tracker is unavailable, fail closed and retry later.
 - Worktrees and snapshot repos are often the main disk cost in the lane; monitor storage during larger waves and clean terminal artifacts promptly.
 - Check repo-specific hotspots such as caches, generated assets, screenshots, traces, or dependency trees instead of assuming every adopter accumulates space the same way.
+
+Privacy:
+
+- Do not paste secrets, credentials, tokens, session cookies, personal data, or raw customer payloads into issue bodies, comments, screenshots, traces, or lane notes.
+- Use redacted identifiers and safe fixtures whenever possible.

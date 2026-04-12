@@ -59,7 +59,7 @@ You can also copy the skill folder into a shared skills location if your Claude 
 
 - `Use $symphony-claude-lane to add a Claude lane to this Symphony + Linear repo for UI and browser-verified work.`
 - `Use $symphony-claude-lane to define what work belongs to Claude versus Codex, then persist the decision into a repo-local routing profile.`
-- `Use $symphony-claude-lane to add a separate Claude Linear project and mixed-lane guidance to this repo.`
+- `Use $symphony-claude-lane to keep one Linear project but add exact-match Claude lane labels and mixed-lane guidance to this repo.`
 - `Use $symphony-claude-lane to keep Claude UI-only for now and document the lane contract.`
 - `Use $symphony-claude-lane to extend the default Claude lane so it also owns docs and review work.`
 
@@ -73,13 +73,16 @@ The skill creates or updates a repo-local routing file:
 
 That file records the adopter's decisions about:
 
+- queue strategy: same-project label routing or a separate project
 - default lane mode and Claude focus areas
 - labels that always or never route to Claude
 - whether visual verification is mandatory
 - preferred Claude models
+- which base-workflow guardrails the Claude lane depends on
 - closeout and retry behavior
 - how the lane behaves when control-plane checks fail
 - cleanup and retention policy for worktrees, snapshots, and repo-specific storage hotspots
+- privacy rules for issue bodies, comments, screenshots, traces, and other run artifacts
 
 Those decisions belong in the adopter repo, not in this shared skill.
 
@@ -99,11 +102,13 @@ Those decisions belong in the adopter repo, not in this shared skill.
 ## Design defaults
 
 - **UI-first + extensible** Claude routing
-- **Separate Claude and Codex Linear projects**
+- **Same Linear project plus exact-match lane labels** by default, with separate projects optional
+- **Inherit the base workflow guardrails** before expanding the Claude lane
 - **Playwright-first visual verification**
 - **Repo-local routing profiles** instead of chat-only preferences
 - **Operator-reviewed closeout by default**, with self-close allowed only where the adopter's workflow supports it safely
 - **Safe non-deletion** when issue state cannot be confirmed
+- **Security/privacy hygiene** so secrets, tokens, cookies, personal data, and raw customer payloads do not leak into issues, comments, screenshots, or traces
 
 These defaults are meant to be useful for many teams, not perfect for every team.
 

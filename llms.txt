@@ -15,11 +15,11 @@ The default Claude lane is intentionally narrow:
 
 The skill also teaches the agent to ask the adopter whether Claude should own any additional areas, then persist those answers into a repo-local routing profile.
 If the adopter does not answer, the skill keeps Claude narrow and records that assumption explicitly.
-The routing profile also captures cleanup and retention rules so the lane accounts for that adopter's actual storage footprint, including worktrees, snapshots, and any repo-specific hotspots.
+The routing profile also captures queue strategy, inherited guardrails, privacy rules, and cleanup or retention rules so the lane accounts for that adopter's actual storage footprint, including worktrees, snapshots, and any repo-specific hotspots.
 
 ## Default workflow
 
-Inspect repo -> confirm mixed-lane candidate -> ask adopter what Claude should own -> fall back to UI-first if unanswered -> create or update `.orchestration/claude-lane.yaml` including retention policy -> define separate Claude queue/project -> document lane contract -> use Playwright for visual verification -> apply safe closeout and cleanup rules
+Inspect repo -> confirm mixed-lane candidate -> confirm the base Symphony workflow already has bootstrap assertions and a no-progress stop-loss -> ask adopter what Claude should own -> fall back to UI-first if unanswered -> create or update `.orchestration/claude-lane.yaml` including queue strategy, privacy rules, and retention policy -> prefer same-project label routing unless stronger separation is needed -> document lane contract -> use Playwright for visual verification -> apply safe closeout and cleanup rules
 
 ## Repo structure
 

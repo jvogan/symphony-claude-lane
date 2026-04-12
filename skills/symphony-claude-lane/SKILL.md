@@ -1,6 +1,6 @@
 ---
 name: symphony-claude-lane
-description: Add a specialized Claude Code lane to an existing Symphony + Linear workflow. Use when an agent needs to decide what work belongs to Claude versus Codex, create a durable routing profile, set up separate Claude queueing, and define Playwright-first visual verification and closeout rules for a mixed-lane repo.
+description: Add a specialized Claude Code lane to an existing Symphony + Linear workflow. Use when an agent needs to decide what work belongs to Claude versus Codex, create a durable routing profile, prefer label-filtered Claude routing in the existing Linear control plane, and define Playwright-first visual verification, privacy, and closeout rules for a mixed-lane repo.
 metadata:
   short-description: Add a Claude lane to Symphony + Linear
 ---
@@ -22,22 +22,25 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 
 1. Inspect the target repo, existing `AGENTS.md`, workflow docs, and issue contract.
 2. Confirm the repo is a real mixed-lane candidate, not just a generic coding repo.
-3. Ask the user what Claude should own beyond the default UI-first lane. If the user is unavailable or vague, keep Claude UI-first, record that assumption in the routing profile, and document it in the repo-local lane guidance.
-4. Create or update a repo-local routing profile from `assets/claude-lane-profile.example.yaml`, including cleanup and retention rules for that adopter's actual storage hotspots.
-5. Recommend or create a separate Claude queue or Linear project, plus lane labels.
-6. Add Claude-lane guidance to the target repo's orchestration docs. Use `assets/claude-lane-guidance.snippet.md` as a starting point. Do not hardcode repo specifics back into this shared skill.
-7. For visual tickets, default to Playwright-based verification before closeout.
-8. Define closeout, retry, `In Review`, and cleanup behavior as part of the lane contract, including how worktrees, snapshots, and other heavy local artifacts are removed safely.
+3. Confirm the base Symphony workflow already has workspace bootstrap assertions, a no-progress stop-loss, and a stable issue contract before recommending lane expansion.
+4. Ask the user what Claude should own beyond the default UI-first lane. If the user is unavailable or vague, keep Claude UI-first, record that assumption in the routing profile, and document it in the repo-local lane guidance.
+5. Create or update a repo-local routing profile from `assets/claude-lane-profile.example.yaml`, including queue strategy, privacy rules, and cleanup or retention rules for that adopter's actual storage hotspots.
+6. Prefer same-project label-filtered lane routing first. Recommend a separate Claude queue or Linear project only when the adopter needs stronger operational separation.
+7. Add Claude-lane guidance to the target repo's orchestration docs. Use `assets/claude-lane-guidance.snippet.md` as a starting point. Do not hardcode repo specifics back into this shared skill.
+8. For visual tickets, default to Playwright-based verification before closeout.
+9. Define closeout, retry, `In Review`, and cleanup behavior as part of the lane contract, including how worktrees, snapshots, and other heavy local artifacts are removed safely.
 
 ## Safety defaults
 
 - Default Claude to UI, UX, design, browser-verified work, copy, and review.
 - Keep ambiguous tickets in the Codex lane until the repo proves the Claude lane is stable.
-- Use separate active queues per lane.
+- Prefer exact-match lane labels and label-filtered claiming. Use separate projects only when the adopter actually needs that extra separation.
 - Persist user routing choices into the repo-local profile, not only in chat.
+- Inherit the base workflow guardrails instead of treating the Claude lane as exempt from them.
 - Prefer operator-reviewed closeout unless the adopter already has a safe self-close path.
 - If issue state cannot be confirmed during closeout or cleanup, preserve artifacts and stop rather than guessing.
 - Do not assume every adopter's storage pressure looks the same; document repo-specific cleanup hotspots in the repo-local profile.
+- Do not put secrets, credentials, tokens, session cookies, personal data, or raw customer payloads into issues, comments, screenshots, traces, or other lane artifacts.
 
 ## Reference map
 
@@ -55,8 +58,10 @@ When this skill is applied well, the target repo should end up with:
 
 - a durable Claude-lane routing profile
 - clear lane labels or queueing rules
+- explicit privacy and redaction rules for lane artifacts
 - repo-local orchestration guidance describing what Claude owns
 - a Playwright-first visual verification rule for frontend tickets
+- inherited base-workflow guardrails called out explicitly
 - explicit closeout and retry behavior for Claude-lane work
 - a documented fallback for control-plane outages or missing tracker state
 - a cleanup and retention policy that covers worktrees, snapshots, and repo-specific storage hotspots

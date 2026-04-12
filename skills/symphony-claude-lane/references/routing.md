@@ -31,6 +31,7 @@ Before broadening the lane, ask:
 3. Which labels should never route to Claude?
 4. Should visual verification be mandatory for all UI tickets, or only a subset?
 5. Is operator review required before `Done`, or can some Claude tickets self-close?
+6. Should the lane stay in the same Linear project with label-filtered routing, or is there a strong reason to split projects?
 
 Do not guess these when the repo has no prior guidance. Persist the answers.
 
@@ -54,18 +55,22 @@ Use `assets/claude-lane-profile.example.yaml` as the source template.
 
 The profile should become the durable contract for:
 
+- queue strategy
 - default lane mode
 - Claude focus areas
 - optional Claude-owned areas
 - labels that always or never route to Claude
 - visual verification expectations
 - preferred models
+- inherited base guardrails
+- privacy and redaction rules
 - closeout behavior
 - whether ambiguous tickets should trigger a user question
 
 ## Recommended first version
 
 - Keep Claude narrow at first
+- Prefer same-project label routing unless operational evidence says you need stronger separation
 - Add extra responsibilities only when the repo shows repeated success
 - Expand by work category, not by vague confidence
 
