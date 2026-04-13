@@ -1,6 +1,6 @@
 # Visual Verification
 
-Use this reference when the Claude lane owns UI or UX work.
+Use this reference when a ticket affects rendered output and requires browser verification before closeout.
 
 ## Default stance
 

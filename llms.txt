@@ -46,7 +46,7 @@ Inspect repo -> confirm multi-model candidate -> confirm base workflow has guard
 ## Repo structure
 
 - `skills/symphony-claude-lane/SKILL.md` — main skill definition
-- `skills/symphony-claude-lane/agents/openai.yaml` — skill UI metadata
+- `skills/symphony-claude-lane/agents/openai.yaml` — skill discovery and interface metadata
 - `skills/symphony-claude-lane/references/setup.md` — prerequisites and candidate checks
 - `skills/symphony-claude-lane/references/routing.md` — routing strategies, model selection criteria, adopter questions
 - `skills/symphony-claude-lane/references/dispatch.md` — model selection algorithm, queue split, worker lifecycle

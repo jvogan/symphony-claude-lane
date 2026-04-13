@@ -1,4 +1,4 @@
-Use a machine-readable outcome block in the final issue comment so the mixed lane can be monitored consistently.
+Use a machine-readable outcome block in the final issue comment so multi-model workflows can be monitored consistently.
 
 ## Success
 

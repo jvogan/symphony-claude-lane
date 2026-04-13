@@ -35,13 +35,13 @@ At adoption time, the environment should support:
 
 ## Preflight checks
 
-Before trusting the lane operationally, verify:
+Before trusting multi-model dispatch operationally, verify:
 
 - Claude can actually read and update the issue tracker used for routing and closeout
 - browser automation can reach the local app or preview environment
 - the repo has stable validation commands for Claude-owned tickets
 - the base Symphony workflow already fails fast on bad workspaces and does not burn indefinitely with no real progress
-- the team has a documented place to store lane policy and operator notes
+- the team has a documented place to store routing policy and operator notes
 - the team has a documented cleanup owner and retention cadence for worktrees, snapshot repos, and run artifacts
 - the team has identified repo-specific storage hotspots such as caches, generated assets, screenshots, traces, or dependency trees
 - the repo has a documented redaction rule for secrets, personal data, and raw customer payloads in issues and run artifacts
