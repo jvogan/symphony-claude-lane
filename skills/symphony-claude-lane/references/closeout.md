@@ -1,6 +1,6 @@
 # Closeout
 
-Use this reference when defining how Claude-lane work reaches a terminal state.
+Use this reference when defining how worker output reaches a terminal state.
 
 ## Default recommendation
 
@@ -18,7 +18,7 @@ That usually means:
 Self-close is reasonable only when:
 
 - the adopter repo already uses direct branch or PR closeout safely
-- the lane has proven reliable on that repo
+- the routing has proven reliable on that repo
 - cleanup behavior will not destroy unreviewed work
 - outcome comments are machine-readable and consistently posted
 - issue-tracker state can be checked reliably at closeout time
@@ -31,7 +31,7 @@ For snapshot or promotion-based repos, prefer `In Review` by default. Avoid auto
 
 Closeout and cleanup often depend on tracker state, auth, and other control-plane checks.
 
-If the lane cannot confirm issue state because the tracker is unavailable, rate-limited, or unauthenticated:
+If the routing cannot confirm issue state because the tracker is unavailable, rate-limited, or unauthenticated:
 
 - do not guess that the issue is terminal
 - do not delete worktrees or run artifacts
@@ -69,7 +69,7 @@ The lane contract should therefore define:
 
 ## Outcome comments
 
-Use a machine-readable block so the lane can be monitored and reviewed consistently. See `assets/linear-outcome-block.example.md`.
+Use a machine-readable block so the routing can be monitored and reviewed consistently. See `assets/linear-outcome-block.example.md`.
 
 At minimum, capture:
 

@@ -96,6 +96,8 @@ The routing profile supports two strategies:
 - **task-characteristic** (default): The orchestrator analyzes each issue and picks the best model based on what the task requires. Labels serve as overrides.
 - **label-only**: Routing is determined entirely by Linear labels. Simpler but less adaptive.
 
+Once routing is configured, the skill also helps set up **Claude worker launch** — the secure process for dispatching `claude -p` against Linear issues in isolated git worktrees. See `references/worker-launch.md` for the full launch pattern and `assets/claude-worker.reference.sh` for a reference implementation you can adapt.
+
 ## Example prompts
 
 ```
@@ -171,13 +173,14 @@ Those decisions belong in the adopter repo, not in this shared skill.
 
 ## Scope boundaries
 
-This is a **portable blueprint**, not a fully runnable starter kit.
+This is a **portable blueprint** with a reference implementation, not a turnkey production system.
+
+It includes a **reference launcher script** (`claude-worker.reference.sh`) and **worker launch docs** (`references/worker-launch.md`) that show the full secure launch pattern. Adapt these to your environment.
 
 It does **not** bundle:
 
-- a universal `claude-worker` launcher
-- a machine-specific `env.sh`
-- a background watchdog
+- a machine-specific `env.sh` or auth setup
+- a background watchdog or queue poller
 - a one-size-fits-all Linear schema
 - hardcoded assumptions about your repo layout or branch strategy
 - an implicit cleanup daemon or retention policy

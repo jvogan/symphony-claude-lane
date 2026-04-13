@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Use this reference when the Claude lane exists but is not behaving reliably.
+Use this reference when multi-model dispatch is not behaving reliably.
 
 ## Max-turn exhaustion
 
@@ -64,7 +64,7 @@ Recommended response:
 Symptoms:
 
 - Claude receives too many implementation-heavy tickets
-- the lane becomes a second vague general-purpose queue
+- Claude becomes a second vague general-purpose queue
 - reviewers no longer know why a ticket was routed to Claude
 
 Recommended response:
@@ -81,7 +81,7 @@ Symptoms:
 - worktrees accumulate indefinitely
 - snapshot repos or promotion directories accumulate indefinitely
 - disk usage grows unexpectedly as worktrees and run artifacts pile up
-- the lane contract says one thing but the runtime does another
+- the routing contract says one thing but the runtime does another
 
 Recommended response:
 
@@ -107,4 +107,4 @@ Recommended response:
 - add an integration verification step to the cleanup automation or operator checklist
 - for snapshot workflows, confirm the promotion marker exists and the expected files are present
 - if work was lost, check whether the worktree or branch can be recovered from git reflog or backup
-- tighten the lane contract to require integration checks, not just terminal-state checks, before cleanup
+- tighten the routing contract to require integration checks, not just terminal-state checks, before cleanup
