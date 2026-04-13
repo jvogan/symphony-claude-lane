@@ -50,13 +50,15 @@ Inspect repo -> confirm multi-model candidate -> confirm base workflow has guard
 - `skills/symphony-claude-lane/references/setup.md` — prerequisites and candidate checks
 - `skills/symphony-claude-lane/references/routing.md` — routing strategies, model selection criteria, adopter questions
 - `skills/symphony-claude-lane/references/dispatch.md` — model selection algorithm, queue split, worker lifecycle
+- `skills/symphony-claude-lane/references/worker-launch.md` — secure Claude worker launch pattern (fetch, worktree, render, launch, finalize, cleanup)
 - `skills/symphony-claude-lane/references/visual-verification.md` — Playwright-first browser verification guidance
 - `skills/symphony-claude-lane/references/closeout.md` — outcome blocks, In Review, retries, self-close rules
 - `skills/symphony-claude-lane/references/troubleshooting.md` — common failure modes
 - `skills/symphony-claude-lane/references/examples.md` — concrete routing examples across task types
 - `skills/symphony-claude-lane/assets/claude-lane-profile.example.yaml` — example routing profile with model selection criteria
 - `skills/symphony-claude-lane/assets/claude-lane-guidance.snippet.md` — starter guidance for adopter repo orchestration docs
-- `skills/symphony-claude-lane/assets/worker-prompt.template.md` — reusable worker prompt template
+- `skills/symphony-claude-lane/assets/claude-worker.reference.sh` — reference launcher script (adapt to your environment)
+- `skills/symphony-claude-lane/assets/worker-prompt.template.md` — worker prompt template with trust boundary, capabilities, and closeout protocol
 - `skills/symphony-claude-lane/assets/linear-outcome-block.example.md` — example structured closeout comments
 
 ## Install

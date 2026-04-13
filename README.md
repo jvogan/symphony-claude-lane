@@ -148,10 +148,11 @@ Those decisions belong in the adopter repo, not in this shared skill.
 | Path | Purpose |
 |---|---|
 | `skills/symphony-claude-lane/SKILL.md` | Main routing and dispatch skill |
-| `skills/.../references/` | Setup, routing, dispatch, visual verification, closeout, troubleshooting, examples |
+| `skills/.../references/` | Setup, routing, dispatch, worker launch, visual verification, closeout, troubleshooting, examples |
 | `skills/.../assets/claude-lane-profile.example.yaml` | Example repo-local routing profile |
 | `skills/.../assets/claude-lane-guidance.snippet.md` | Starter snippet for adopter repo orchestration docs |
-| `skills/.../assets/worker-prompt.template.md` | Reusable worker prompt template for Claude workers |
+| `skills/.../assets/claude-worker.reference.sh` | Reference launcher script (adapt to your environment) |
+| `skills/.../assets/worker-prompt.template.md` | Worker prompt template with trust boundary, capabilities, and closeout protocol |
 | `skills/.../assets/linear-outcome-block.example.md` | Example machine-readable closeout comments |
 | `skills/.../agents/openai.yaml` | Skill metadata |
 | `llms.txt` | Agent-oriented summary of the repo |

@@ -29,9 +29,10 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 5. Ask the user about their routing preferences: should the orchestrator analyze task characteristics automatically, or use label-only routing? Which agent capabilities matter most for this repo? Is this a mixed-model or Claude-only setup?
 6. Create or update a repo-local routing profile from `assets/claude-lane-profile.example.yaml`, including routing strategy, model selection criteria, privacy rules, and cleanup or retention rules for that adopter's actual storage hotspots.
 7. Prefer same-project label-filtered routing when labels are used. Recommend a separate queue or Linear project only when the adopter needs stronger operational separation.
-8. Add routing and dispatch guidance to the target repo's orchestration docs. Use `assets/claude-lane-guidance.snippet.md` as a starting point. Use `assets/worker-prompt.template.md` as the basis for Claude worker prompts. Do not hardcode repo specifics back into this shared skill.
-9. For tickets that affect rendered output, default to Playwright-based verification before closeout.
-10. Define closeout, retry, `In Review`, and cleanup behavior as part of the routing contract, including how worktrees, snapshots, and other heavy local artifacts are removed safely.
+8. Add routing and dispatch guidance to the target repo's orchestration docs. Use `assets/claude-lane-guidance.snippet.md` as a starting point. Do not hardcode repo specifics back into this shared skill.
+9. Help the adopter set up Claude worker launch capability. Use `references/worker-launch.md` for the secure launch pattern and `assets/claude-worker.reference.sh` as a starting point for the launcher script. Use `assets/worker-prompt.template.md` as the basis for worker prompts. Adapt all paths, auth, and MCP config to the adopter's environment.
+10. For tickets that affect rendered output, default to Playwright-based verification before closeout.
+11. Define closeout, retry, `In Review`, and cleanup behavior as part of the routing contract, including how worktrees, snapshots, and other heavy local artifacts are removed safely.
 
 ## Safety defaults
 
@@ -50,6 +51,7 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Read `references/setup.md` first when deciding whether the target repo is ready.
 - Read `references/routing.md` before analyzing work patterns or asking the user about routing preferences.
 - Read `references/dispatch.md` when defining queue split, model selection, and worker lifecycle.
+- Read `references/worker-launch.md` when helping the adopter set up the Claude worker launcher, MCP config, or security practices.
 - Read `references/visual-verification.md` before writing browser-verification policy.
 - Read `references/closeout.md` when defining `In Review`, outcome blocks, retry behavior, or self-close rules.
 - Read `references/troubleshooting.md` when a worker stalls, exhausts turns, or drifts from the routing contract.
@@ -59,6 +61,7 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 
 When this skill is applied well, the target repo should end up with:
 
+- a working Claude worker launch setup (launcher script, MCP config, prompt template)
 - a durable routing profile with model selection criteria
 - clear routing rules — task-characteristic analysis, label overrides, or both
 - explicit privacy and redaction rules for all worker artifacts
