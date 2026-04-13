@@ -1,18 +1,18 @@
 # Symphony + Claude Lane
 
-> An installable agent skill that teaches an orchestrator smart multi-model dispatch for OpenAI Symphony + Linear workflows — routing tasks to Claude Code or Codex based on what each task requires.
+> An installable agent skill that adds Claude Code workers alongside Codex in OpenAI Symphony + Linear workflows. Symphony dispatches Codex workers through its Elixir runtime; this skill adds Claude workers via `claude -p`, tracked through the same Linear backlog, with smart routing that sends each task to the right agent.
 
 ## What this is
 
-A skill you install into an AI coding agent (Codex or Claude Code) to set up intelligent task routing. Once installed, your agent can analyze each issue's characteristics, pick the best model for the job, create a durable routing profile in the target repo, and define visual verification, privacy, and closeout rules for multi-model execution. Also supports Claude-only setups without Codex.
+A skill you install into an AI coding agent (Codex or Claude Code) that teaches the orchestrator how to run Claude workers alongside Symphony's Codex workers. Once installed, your agent can analyze each issue's characteristics, pick the best model, launch Claude workers securely in isolated git worktrees, create a durable routing profile, and define visual verification, privacy, and closeout rules. Also supports Claude-only setups without Codex. No API plumbing required — both Codex and Claude Code are subscription tools with built-in agent capabilities.
 
 ## Who this is for
 
-Developers and operators who run Symphony + Linear and want their orchestrator to pick the right agent for each task — Claude Code for work requiring visual judgment, deep reasoning, browser verification, security review, or external tools; Codex for fast, bounded, sandbox-compatible implementation. Also for teams that want Claude-only workers against Linear issues.
+Developers and operators who run Symphony + Linear with Codex workers and want to add Claude Code for tasks that benefit from visual judgment, deep reasoning, browser verification, external tool access, security review, or documentation quality. Also for teams that want Claude-only workers against Linear issues without Codex.
 
-## Why smart model selection?
+## How the two runtimes work together
 
-Different AI agents have different strengths. Claude Code excels at visual judgment, deep reasoning, browser verification, external tool access, code review, documentation, and security analysis. Codex excels at fast bounded implementation, parallel execution, sandbox-compatible tasks, and mechanical refactors. Routing each task to the model best suited for it produces better output than using either alone.
+Symphony (Elixir) dispatches Codex workers — managing worktrees, scheduling, and process supervision. Claude workers run via `claude -p` directly — launched by the orchestrator or a launcher script, not through Symphony's runtime. Linear is the shared control plane for both: issues, state transitions, routing labels, and closeout all live there regardless of which agent executes the work.
 
 ## Key concepts
 

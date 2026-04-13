@@ -5,42 +5,40 @@
 
 ![Symphony + Claude Lane](assets/social-preview.png)
 
-**Teach your orchestrator to pick the right AI agent for each task.**
+**Run Claude Code workers alongside Codex in your Symphony + Linear workflow.**
 
-This is an installable [agent skill](https://agentskills.io/specification) for [Codex](https://openai.com/index/codex/) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It teaches an orchestrator how to analyze tasks and route them to the model that will produce the best output — Claude Code for work requiring visual judgment, deep reasoning, browser verification, or external tools; Codex for fast, bounded, sandbox-compatible implementation.
+[Symphony](https://github.com/openai/symphony) dispatches [Codex](https://openai.com/index/codex/) workers through its Elixir runtime. This [agent skill](https://agentskills.io/specification) adds [Claude Code](https://docs.anthropic.com/en/docs/claude-code) workers to the same workflow — running via `claude -p` in isolated git worktrees, tracked through the same [Linear](https://linear.app) backlog, with smart routing that sends each task to the agent best suited for it.
 
-You install the skill, point it at a repo, and your agent gains a multi-model routing system: task-characteristic analysis, label overrides, visual verification rules, and a durable routing profile that the whole team can see.
+You install the skill, point it at a repo, and your orchestrator agent learns how to route tasks between models, launch Claude workers securely, verify frontend output with Playwright, and close out work through Linear.
 
 ```
-                       Orchestrator
-                           |
-                    Linear (issues & state)
-                           |
-                     Smart Router
-                    /      |      \
-              Codex     Claude    Either
-              workers   workers   (ambiguous →
-              (fast,    (visual,   ask operator
-               bounded,  complex,  or pick the
-               sandbox)  tools,    safer choice)
-                         review)
+                     Orchestrator
+                    /            \
+            Symphony              claude -p
+            (Elixir)              (direct launch)
+               |                      |
+          Codex workers          Claude workers
+          (sandbox, fast,        (browser, reasoning,
+           parallel)              tools, review)
+               |                      |
+               \________Linear________/
+                (shared issues & state)
 ```
 
-## Why smart model selection?
+## Why run both?
 
-Different AI agents have different strengths. Using both against the same backlog — each claiming tasks that match what it's best at — produces better output than either alone.
+Different AI agents have different strengths. Running both against the same Linear backlog — each claiming tasks that match what it's best at — produces better output than either alone.
 
-| Route to Claude Code | Route to Codex |
+| Claude Code | Codex |
 |---|---|
-| Requires browser verification | Bounded, sandbox-compatible implementation |
-| Requires visual judgment (UI, design, UX) | Config, schema, type, migration changes |
-| Requires deep reasoning (architecture, debugging) | Test infrastructure (unit tests, fixtures) |
-| Requires external tools (APIs, databases, MCP) | Mechanical refactors |
-| Security review, code review | Parallelizable batch of similar tasks |
-| Documentation, product copy | Fast execution where speed matters more than judgment |
-| E2E tests (sandbox-incompatible) | |
+| Browser verification, visual judgment | Bounded, sandbox-compatible implementation |
+| Deep reasoning (architecture, debugging) | Config, schema, type, migration changes |
+| External tools (APIs, databases, MCP) | Test infrastructure (unit tests, fixtures) |
+| Security review, code review | Mechanical refactors |
+| Documentation, product copy | Parallelizable batch of similar tasks |
+| E2E tests (sandbox-incompatible) | Fast execution where speed > judgment |
 
-The skill also supports **Claude-only** setups for teams that don't use Codex.
+The skill also supports **Claude-only** setups for teams that don't use Codex. No API plumbing required — both Codex and Claude Code are subscription tools with built-in agent capabilities.
 
 ## Prerequisites
 
@@ -84,19 +82,29 @@ Or copy the skill folder into your project and reference `skills/symphony-claude
 
 ## How it works
 
-1. Point an agent at a repo that already uses Symphony + Linear.
-2. The skill inspects the repo and confirms it's a candidate for multi-model dispatch.
-3. It confirms the base workflow has guardrails (bootstrap assertions, stop-loss) before adding routing.
-4. It analyzes the repo's work patterns and asks about routing preferences.
-5. It creates a routing profile (`.orchestration/claude-lane.yaml`) with model selection criteria, label overrides, privacy rules, and cleanup policy.
-6. It documents the routing contract so both human operators and agents know how tasks get dispatched.
+**Setup** (the skill helps your orchestrator do this):
 
-The routing profile supports two strategies:
+1. Inspect a repo that already uses Symphony + Linear.
+2. Confirm the base workflow has guardrails (bootstrap assertions, stop-loss) before adding Claude workers.
+3. Analyze the repo's work patterns and ask about routing preferences.
+4. Create a routing profile (`.orchestration/claude-lane.yaml`) with model selection criteria, label overrides, privacy rules, and cleanup policy.
+5. Set up the Claude worker launcher — the secure process for dispatching `claude -p` against Linear issues in isolated git worktrees.
+6. Document the routing contract so both human operators and agents know how tasks get dispatched.
+
+**Dispatch** (how it runs after setup):
+
+1. The orchestrator plans issues in Linear with routing labels or task analysis.
+2. Symphony picks up Codex-routed issues and dispatches Codex workers through its Elixir runtime.
+3. The Claude launcher picks up Claude-routed issues and dispatches `claude -p` workers in isolated worktrees.
+4. Both types of workers post structured outcomes back to Linear when done.
+5. The orchestrator reviews all output in one place, integrates changes, and promotes learnings.
+
+**Routing strategies:**
 
 - **task-characteristic** (default): The orchestrator analyzes each issue and picks the best model based on what the task requires. Labels serve as overrides.
 - **label-only**: Routing is determined entirely by Linear labels. Simpler but less adaptive.
 
-Once routing is configured, the skill also helps set up **Claude worker launch** — the secure process for dispatching `claude -p` against Linear issues in isolated git worktrees. See `references/worker-launch.md` for the full launch pattern and `assets/claude-worker.reference.sh` for a reference implementation you can adapt.
+The skill includes a [reference launcher script](skills/symphony-claude-lane/assets/claude-worker.reference.sh) and [worker launch docs](skills/symphony-claude-lane/references/worker-launch.md) with a full security checklist you can adapt to your environment.
 
 ## Example prompts
 
@@ -205,7 +213,7 @@ Adopters should treat cleanup as part of the routing design:
 
 ## Links
 
-- [OpenAI Symphony](https://github.com/openai/symphony) — the dispatch and isolation runtime
+- [OpenAI Symphony](https://github.com/openai/symphony) — Elixir-based dispatch and isolation runtime for Codex workers
 - [Linear](https://linear.app) — issue tracker used for routing and state
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — agent runtime for Claude workers
 - [Codex](https://openai.com/index/codex/) — agent runtime for Codex workers
