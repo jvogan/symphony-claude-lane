@@ -71,14 +71,12 @@ Restart Codex after installing so the skill is discoverable.
 
 ### Claude Code (manual)
 
-Add the skill as a context reference in your project's `CLAUDE.md`:
+Copy the skill folder into your project, then add it as a context reference in your `CLAUDE.md`:
 
 ```markdown
 <!-- In your project's CLAUDE.md -->
 See @skills/symphony-claude-lane/SKILL.md for multi-model routing.
 ```
-
-Or copy the skill folder into your project and reference `skills/symphony-claude-lane/SKILL.md` directly from your agent instructions.
 
 ## How it works
 

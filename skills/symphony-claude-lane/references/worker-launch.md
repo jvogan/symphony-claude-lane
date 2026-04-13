@@ -102,7 +102,7 @@ Key flags:
 
 **Working directory** must be the worktree, not the source repo. The worker should only see and modify files in its own worktree.
 
-**Background mode:** Wrap the launch in a subshell backgrounded with `&`. Write the PID to `$RUNS_ROOT/$ISSUE_ID/worker.pid` atomically from inside the subshell. The outer process reads back the PID and exits.
+**Background mode (optional):** If your orchestrator needs non-blocking dispatch, wrap the launch in a subshell backgrounded with `&`. Write the PID to `$RUNS_ROOT/$ISSUE_ID/worker.pid` atomically from inside the subshell. The outer process reads back the PID and exits. The reference launcher runs in foreground by default — adapt to background if needed.
 
 ### Step 6 — Finalize
 
