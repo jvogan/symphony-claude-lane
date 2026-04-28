@@ -21,6 +21,7 @@ Symphony (Elixir) dispatches Codex workers — managing worktrees, scheduling, a
 - **Claude-Only Mode**: For teams without Codex. All tasks route to Claude. The dispatch contract still applies.
 - **Routing Profile**: A repo-local YAML file (`.orchestration/claude-lane.yaml`) that records model selection criteria, label overrides, privacy rules, guardrails, and cleanup policy.
 - **Visual Verification**: Playwright-first browser verification for tickets affecting rendered output.
+- **Fail-Closed Worker Launch**: Claude launchers should require an explicit Claude route, pass only an allowlisted environment, render an explicit closeout state, and keep dry-runs free of worktree/run artifacts.
 
 ## When to prefer Claude
 

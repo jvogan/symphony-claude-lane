@@ -173,7 +173,11 @@ Those decisions belong in the adopter repo, not in this shared skill.
 - **Inherit the base workflow guardrails** before expanding routing
 - **Playwright-first visual verification** for work affecting rendered output
 - **Repo-local routing profiles** instead of chat-only preferences
+- **Fail-closed Claude routing guards** before launching full-access workers
 - **Operator-reviewed closeout by default**, with self-close allowed only where proven safe
+- **Explicit closeout state** rendered into worker prompts
+- **Worker environment allowlists** instead of inheriting the full operator shell
+- **No-side-effect dry-runs** for launcher validation
 - **Safe non-deletion** when issue state cannot be confirmed
 - **Security/privacy hygiene** so secrets, tokens, and personal data stay out of artifacts
 

@@ -41,7 +41,10 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Keep ambiguous tickets in the more conservative path until the repo proves the routing is stable.
 - Persist user routing choices into the repo-local profile, not only in chat.
 - Inherit the base workflow guardrails instead of treating any model's lane as exempt from them.
+- Require an explicit Claude route before launching a full-access Claude worker. Labels, project filters, or assignee filters are acceptable portable guards.
+- Launch Claude workers with an allowlisted environment rather than inheriting the full operator shell.
 - Prefer operator-reviewed closeout unless the adopter already has a safe self-close path.
+- Render the intended closeout state into the worker prompt so issue text cannot choose `Done` versus `In Review`.
 - If issue state cannot be confirmed during closeout or cleanup, preserve artifacts and stop rather than guessing.
 - Do not assume every adopter's storage pressure looks the same; document repo-specific cleanup hotspots in the repo-local profile.
 - Do not put secrets, credentials, tokens, session cookies, personal data, or raw customer payloads into issues, comments, screenshots, traces, or other artifacts.

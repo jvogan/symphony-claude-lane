@@ -19,6 +19,17 @@ claude_only: false
 # - separate-project
 queue_strategy: shared-project-labels
 
+# Launcher-level dispatch guardrails. A Claude worker should not launch for an
+# arbitrary Linear issue unless at least one of these guards matches, or the
+# operator deliberately passes an override such as --allow-unrouted.
+worker_launcher:
+  require_explicit_routing: true
+  required_label: lane:claude
+  allowed_project_regex: Claude
+  allowed_assignee: null
+  inherit_full_environment: false
+  dry_run_creates_artifacts: false
+
 # --- Model selection criteria ---
 # These guide the orchestrator when routing_strategy is task-characteristic.
 
@@ -100,6 +111,8 @@ privacy_rules:
 # Default closeout policy.
 closeout_mode:
   default: in-review
+  worker_success_state: In Review
+  self_close_state: Done
   on_control_plane_failure: preserve-artifacts
   allow_self_close_for:
     - direct-branch

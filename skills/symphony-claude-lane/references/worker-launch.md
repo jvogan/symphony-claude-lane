@@ -10,7 +10,7 @@ A Claude worker is a `claude -p` process running in an isolated git worktree aga
 
 ### Step 1 — Fetch the issue
 
-Query Linear's GraphQL API for the issue's title, description, and state.
+Query Linear's GraphQL API for the issue's title, description, state, project, labels, and assignee.
 
 ```
 POST https://api.linear.app/graphql
@@ -18,7 +18,15 @@ POST https://api.linear.app/graphql
 
 **Security:** Write the `Authorization: Bearer $LINEAR_API_KEY` header to a temp file and pass it via `curl -H @file`. Delete the temp file immediately after the request. This prevents the API key from appearing in the process argument list (`ps aux`).
 
-**Guard:** If the issue state is terminal (`Done`, `Closed`, `Cancelled`, `Duplicate`), abort — never dispatch a worker against a completed issue.
+**Guard:** If the issue state is terminal (`Done`, `Closed`, `Cancelled`, `Canceled`, `Duplicate`), abort — never dispatch a worker against a completed issue.
+
+**Routing guard:** A worker launcher should fail closed unless the issue is explicitly routed to Claude. Common portable guards are:
+
+- a Linear label such as `lane:claude`
+- a project name matching an operator-configured regex such as `Claude`
+- a configured assignee id, email, or name
+
+Provide an explicit override such as `--allow-unrouted` only for trusted manual dispatch.
 
 ### Step 2 — Create a git worktree
 
@@ -30,7 +38,7 @@ Each worker gets its own worktree so multiple workers can run in parallel withou
 
 **Guard:** If the worktree already exists and this is not a `--resume`, abort and show a message explaining how to remove it or resume the previous session.
 
-**Input validation:** Reject branch names containing single quotes to prevent shell injection into metadata files.
+**Input validation:** Reject single quotes in any value written to `meta.env`, including branch, base branch, repo path, model id, closeout state, required label, and assignee. Validate issue ids as `TEAM-123` and validate `--max-turns` as a positive integer.
 
 ### Step 3 — Render the prompt
 
@@ -47,6 +55,7 @@ Use the worker prompt template (`assets/worker-prompt.template.md`) and substitu
 | `{{BASE_BRANCH}}` | Branch the worktree was created from |
 | `{{ROUTING_PROFILE_PATH}}` | Path to `.orchestration/claude-lane.yaml` |
 | `{{MODEL}}` | Model identifier (e.g. `claude-opus-4-6`) |
+| `{{CLOSEOUT_STATE}}` | Tracker state the worker should use after success, usually `In Review` |
 
 **Security:** Pass the issue description via **stdin** to the rendering script, not as a shell argument. This prevents shell expansion of user-supplied content that may contain backticks, quotes, dollar signs, or newlines.
 
@@ -70,6 +79,9 @@ session_id=''
 exit_code=''
 end_time=''
 status='starting'
+closeout_state='In Review'
+routing='label'
+integrated='false'
 ```
 
 **Security:** All values are single-quoted. This file must **never** be `source`d — always parse with `grep + sed`. A worker that writes malicious content to its run directory must not be able to execute arbitrary code through the status or cleanup scripts.
@@ -78,7 +90,16 @@ status='starting'
 
 ```bash
 cd "$WORKTREE_PATH"
-claude -p "$RENDERED_PROMPT" \
+env -i \
+    HOME="$HOME" \
+    PATH="$PATH" \
+    SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}" \
+    LINEAR_API_KEY="$LINEAR_API_KEY" \
+    ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}" \
+    CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
+    CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}" \
+    claude -p "$RENDERED_PROMPT" \
     --model "$MODEL" \
     --name "claude-worker-${ISSUE_ID_LOWER}" \
     --mcp-config "$MCP_CONFIG_PATH" \
@@ -101,6 +122,10 @@ Key flags:
 | `--output-format stream-json` | Each event is a JSON line for parsing |
 
 **Working directory** must be the worktree, not the source repo. The worker should only see and modify files in its own worktree.
+
+**Environment:** Prefer an allowlisted environment instead of inheriting the operator's full shell. Include only what the worker needs: `HOME`, `PATH`, `SSH_AUTH_SOCK` for git over SSH, `LINEAR_API_KEY`, Claude auth/config variables, locale variables, temp directory variables, and browser automation paths when needed.
+
+**Dry run:** A safe `--dry-run` should validate the issue and routing, then print the worktree, branch, model, closeout state, and launch command without creating a worktree, run directory, prompt, or metadata.
 
 **Background mode (optional):** If your orchestrator needs non-blocking dispatch, wrap the launch in a subshell backgrounded with `&`. Write the PID to `$RUNS_ROOT/$ISSUE_ID/worker.pid` atomically from inside the subshell. The outer process reads back the PID and exits. The reference launcher runs in foreground by default — adapt to background if needed.
 
@@ -179,9 +204,12 @@ The worktree and branch are preserved. The worker picks up where it left off.
 |---|---|
 | API key via temp file + `curl -H @file` | Prevents key appearing in `ps aux` |
 | Issue description via stdin | Prevents shell expansion of user content |
-| Branch name validation (reject `'`) | Prevents injection into single-quoted meta.env |
+| Routing guard before dispatch | Prevents unrelated Linear issues from driving full-access workers |
+| Input validation for meta.env fields | Prevents injection into single-quoted meta.env |
 | meta.env never `source`d | Prevents code execution from worker-written files |
 | session_id regex validation | Prevents metacharacter injection from output stream |
 | Prompt injection boundary (`<issue_body>` tags) | Worker treats issue content as data, not instructions |
 | Worktree isolation | Workers can only modify their own copy of the repo |
+| Environment allowlist | Prevents full operator shell env from leaking to workers |
+| Explicit closeout state | Prevents issue text from choosing `Done` vs `In Review` |
 | `--max-turns` hard cap | Prevents runaway sessions from burning unlimited tokens |

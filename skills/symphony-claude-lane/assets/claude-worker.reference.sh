@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Claude Worker — Reference Launcher
+# Claude Worker - Reference Launcher
 # ============================================================================
 #
 # This is a REFERENCE IMPLEMENTATION, not a production-ready script.
@@ -14,8 +14,12 @@
 #   --base <branch>       Base branch (default: main)
 #   --model <model>       Claude model (default: claude-opus-4-6)
 #   --max-turns <n>       Turn limit (default: 50)
+#   --closeout <state>    Linear closeout state (default: In Review)
+#   --self-close          Use CLAUDE_SELF_CLOSE_STATE instead of closeout default
+#   --allow-unrouted      Allow dispatch when no routing guard matches
 #   --resume              Resume a previous session in an existing worktree
-#   --dry-run             Print what would happen without executing
+#   --dry-run             Validate issue/routing and print the plan; no files created
+#   -h, --help            Show help
 #
 # Required environment:
 #   LINEAR_API_KEY        Linear API key (never stored in this script).
@@ -29,15 +33,106 @@
 #   Set these env vars or edit the defaults below. Paths are relative to
 #   the working directory when the script is invoked.
 #
-#   CLAUDE_WORKSPACES_ROOT   Where git worktrees are created (default: ./workspaces)
-#   CLAUDE_RUNS_ROOT         Where per-run metadata lives (default: ./runs)
-#   CLAUDE_TEMPLATE_PATH     Worker prompt template (default: ./assets/worker-prompt.template.md)
-#   CLAUDE_MCP_CONFIG        MCP config for workers (default: ./mcp/worker-mcp.json)
-#   CLAUDE_WORKER_MODEL      Default model (default: claude-opus-4-6)
-#   CLAUDE_WORKER_MAX_TURNS  Default turn limit (default: 50)
+#   CLAUDE_WORKSPACES_ROOT    Where git worktrees are created (default: ./workspaces)
+#   CLAUDE_RUNS_ROOT          Where per-run metadata lives (default: ./runs)
+#   CLAUDE_TEMPLATE_PATH      Worker prompt template (default: ./assets/worker-prompt.template.md)
+#   CLAUDE_MCP_CONFIG         MCP config for workers (default: ./mcp/worker-mcp.json)
+#   CLAUDE_WORKER_MODEL       Default model (default: claude-opus-4-6)
+#   CLAUDE_WORKER_MAX_TURNS   Default turn limit (default: 50)
+#   CLAUDE_CLOSEOUT_STATE     Default closeout state (default: In Review)
+#   CLAUDE_SELF_CLOSE_STATE   Self-close state when --self-close is used (default: Done)
+#   CLAUDE_REQUIRE_ROUTING    Require a label/project/assignee guard (default: true)
+#   CLAUDE_REQUIRED_LABEL     Required Linear label option (default: lane:claude)
+#   CLAUDE_ALLOWED_PROJECT_REGEX  Allowed Linear project regex (default: Claude)
+#   CLAUDE_ALLOWED_ASSIGNEE   Allowed assignee id, email, or name (default: unset)
+#   CLAUDE_WORKER_ENV_ALLOWLIST   Space-separated env vars passed to claude
 #
 # ============================================================================
 set -euo pipefail
+
+GRAPHQL_URL="https://api.linear.app/graphql"
+TERMINAL_STATES=("Done" "Closed" "Cancelled" "Canceled" "Duplicate")
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: claude-worker.reference.sh <ISSUE-ID> <REPO-PATH> [options]
+
+Options:
+  --branch <name>       Feature branch name (default: claude/<issue-id>)
+  --base <branch>       Base branch (default: main)
+  --model <model>       Claude model (default: CLAUDE_WORKER_MODEL or claude-opus-4-6)
+  --max-turns <n>       Turn limit (default: CLAUDE_WORKER_MAX_TURNS or 50)
+  --closeout <state>    Linear closeout state (default: CLAUDE_CLOSEOUT_STATE or In Review)
+  --self-close          Use CLAUDE_SELF_CLOSE_STATE instead of closeout default
+  --allow-unrouted      Allow dispatch when no routing guard matches
+  --resume              Resume a previous session in an existing worktree
+  --dry-run             Validate issue/routing and print the plan; no files created
+  -h, --help            Show this help
+USAGE
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+reject_single_quote() {
+  local field_name="$1"
+  local value="$2"
+  if [[ "$value" == *"'"* ]]; then
+    die "$field_name cannot contain single quotes: $value"
+  fi
+}
+
+csv_contains() {
+  local csv="$1"
+  local needle="$2"
+  local item
+  local -a items
+  [[ -n "$needle" ]] || return 1
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+assignee_matches() {
+  local allowed="$1"
+  local id="$2"
+  local email="$3"
+  local name="$4"
+  [[ -n "$allowed" ]] || return 1
+  [[ "$allowed" == "$id" || "$allowed" == "$email" || "$allowed" == "$name" ]]
+}
+
+is_terminal_state() {
+  local state="$1"
+  local terminal
+  for terminal in "${TERMINAL_STATES[@]}"; do
+    [[ "$state" == "$terminal" ]] && return 0
+  done
+  return 1
+}
+
+append_env_arg() {
+  local var_name="$1"
+  [[ "$var_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 0
+  if [[ -n "${!var_name+x}" ]]; then
+    claude_env+=("$var_name=${!var_name}")
+  fi
+}
+
+abspath_from_launch_cwd() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$launch_cwd" "$1" ;;
+  esac
+}
 
 # --- Configuration (adapt these to your environment) ---
 WORKSPACES_ROOT="${CLAUDE_WORKSPACES_ROOT:-./workspaces}"
@@ -46,86 +141,110 @@ TEMPLATE_PATH="${CLAUDE_TEMPLATE_PATH:-./assets/worker-prompt.template.md}"
 MCP_CONFIG_PATH="${CLAUDE_MCP_CONFIG:-./mcp/worker-mcp.json}"
 DEFAULT_MODEL="${CLAUDE_WORKER_MODEL:-claude-opus-4-6}"
 DEFAULT_MAX_TURNS="${CLAUDE_WORKER_MAX_TURNS:-50}"
+DEFAULT_CLOSEOUT_STATE="${CLAUDE_CLOSEOUT_STATE:-In Review}"
+DEFAULT_SELF_CLOSE_STATE="${CLAUDE_SELF_CLOSE_STATE:-Done}"
+REQUIRE_ROUTING="${CLAUDE_REQUIRE_ROUTING:-true}"
+REQUIRED_LABEL="${CLAUDE_REQUIRED_LABEL:-lane:claude}"
+ALLOWED_PROJECT_REGEX="${CLAUDE_ALLOWED_PROJECT_REGEX:-Claude}"
+ALLOWED_ASSIGNEE="${CLAUDE_ALLOWED_ASSIGNEE:-}"
+WORKER_ENV_ALLOWLIST="${CLAUDE_WORKER_ENV_ALLOWLIST:-HOME PATH SHELL TMPDIR USER LOGNAME LANG LC_ALL LC_CTYPE SSH_AUTH_SOCK LINEAR_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR XDG_CONFIG_HOME XDG_CACHE_HOME PLAYWRIGHT_BROWSERS_PATH}"
+
+if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -lt 2 ]]; then
+  usage
+  exit 2
+fi
 
 # --- Argument parsing ---
-issue_id="${1:?Usage: $0 <ISSUE-ID> <REPO-PATH> [options]}"
-repo_path="${2:?Usage: $0 <ISSUE-ID> <REPO-PATH> [options]}"
+issue_id="$1"
+repo_path="$2"
 shift 2
 
 issue_id_upper=$(printf '%s' "$issue_id" | tr '[:lower:]' '[:upper:]')
-issue_id_lower=$(printf '%s' "$issue_id" | tr '[:upper:]' '[:lower:]')
+issue_id_lower=$(printf '%s' "$issue_id_upper" | tr '[:upper:]' '[:lower:]')
 
 branch="claude/${issue_id_lower}"
 base_branch="main"
 model="$DEFAULT_MODEL"
 max_turns="$DEFAULT_MAX_TURNS"
+closeout_state="$DEFAULT_CLOSEOUT_STATE"
 resume=false
 dry_run=false
+allow_unrouted=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --branch)    branch="$2"; shift 2 ;;
-    --base)      base_branch="$2"; shift 2 ;;
-    --model)     model="$2"; shift 2 ;;
-    --max-turns) max_turns="$2"; shift 2 ;;
+    --branch)    branch="${2:?--branch requires a value}"; shift 2 ;;
+    --base)      base_branch="${2:?--base requires a value}"; shift 2 ;;
+    --model)     model="${2:?--model requires a value}"; shift 2 ;;
+    --max-turns) max_turns="${2:?--max-turns requires a value}"; shift 2 ;;
+    --closeout)  closeout_state="${2:?--closeout requires a value}"; shift 2 ;;
+    --self-close) closeout_state="$DEFAULT_SELF_CLOSE_STATE"; shift ;;
+    --allow-unrouted) allow_unrouted=true; shift ;;
     --resume)    resume=true; shift ;;
     --dry-run)   dry_run=true; shift ;;
-    *) echo "Unknown option: $1" >&2; exit 1 ;;
+    -h|--help)   usage; exit 0 ;;
+    *) die "Unknown option: $1" ;;
   esac
 done
 
+launch_cwd=$(pwd -P)
+repo_path=$(abspath_from_launch_cwd "$repo_path")
+WORKSPACES_ROOT=$(abspath_from_launch_cwd "$WORKSPACES_ROOT")
+RUNS_ROOT=$(abspath_from_launch_cwd "$RUNS_ROOT")
+TEMPLATE_PATH=$(abspath_from_launch_cwd "$TEMPLATE_PATH")
+MCP_CONFIG_PATH=$(abspath_from_launch_cwd "$MCP_CONFIG_PATH")
+
 # --- Input validation ---
-# Reject branch names with single quotes (prevents injection into meta.env)
-if [[ "$branch" == *"'"* ]]; then
-  echo "ERROR: Branch name cannot contain single quotes: $branch" >&2
-  exit 1
-fi
+[[ "$issue_id_upper" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]] || die "Invalid issue ID: $issue_id (expected TEAM-123)"
+[[ "$max_turns" =~ ^[0-9]+$ ]] || die "--max-turns must be a positive integer"
+[[ "$max_turns" -gt 0 ]] || die "--max-turns must be greater than 0"
 
-# Parse TEAM-123 into team key and number
-team_key=$(printf '%s' "$issue_id_upper" | sed 's/-[0-9]*$//')
-issue_num=$(printf '%s' "$issue_id_upper" | grep -o '[0-9]*$')
+# These values are written to meta.env. Reject single quotes so status and
+# cleanup tooling can parse metadata without sourcing worker-writable files.
+reject_single_quote "Branch name" "$branch"
+reject_single_quote "Base branch" "$base_branch"
+reject_single_quote "Repo path" "$repo_path"
+reject_single_quote "Workspaces root" "$WORKSPACES_ROOT"
+reject_single_quote "Runs root" "$RUNS_ROOT"
+reject_single_quote "Model" "$model"
+reject_single_quote "Closeout state" "$closeout_state"
+reject_single_quote "Required label" "$REQUIRED_LABEL"
+reject_single_quote "Allowed assignee" "$ALLOWED_ASSIGNEE"
 
-# Validate team_key is alphanumeric and issue_num is a positive integer
-if ! printf '%s' "$team_key" | grep -qE '^[A-Z][A-Z0-9]*$'; then
-  echo "ERROR: Invalid team key in issue ID: $team_key (expected uppercase alphanumeric)" >&2
-  exit 1
-fi
-if ! printf '%s' "$issue_num" | grep -qE '^[0-9]+$'; then
-  echo "ERROR: Invalid issue number in issue ID: $issue_num (expected positive integer)" >&2
-  exit 1
-fi
+# Parse TEAM-123 into team key and number.
+team_key="${issue_id_upper%%-*}"
+issue_num="${issue_id_upper##*-}"
 
 # --- Preflight checks ---
 for cmd in claude jq python3 curl git; do
-  command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: $cmd not found on PATH" >&2; exit 1; }
+  command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found on PATH"
 done
 
-[[ -n "${LINEAR_API_KEY:-}" ]] || { echo "ERROR: LINEAR_API_KEY not set" >&2; exit 1; }
-[[ -d "$repo_path/.git" ]]    || { echo "ERROR: $repo_path is not a git repo" >&2; exit 1; }
-[[ -f "$TEMPLATE_PATH" ]]     || { echo "ERROR: Template not found: $TEMPLATE_PATH" >&2; exit 1; }
-[[ -f "$MCP_CONFIG_PATH" ]]   || { echo "ERROR: MCP config not found: $MCP_CONFIG_PATH (see worker-launch.md for the expected format)" >&2; exit 1; }
-
-# --- Derived paths ---
-worktree_path="$WORKSPACES_ROOT/$issue_id_upper"
-run_dir="$RUNS_ROOT/$issue_id_upper"
-mkdir -p "$run_dir" "$WORKSPACES_ROOT"
+[[ -n "${LINEAR_API_KEY:-}" ]] || die "LINEAR_API_KEY not set"
+[[ -d "$repo_path/.git" ]]    || die "$repo_path is not a git repo"
+[[ -f "$TEMPLATE_PATH" ]]     || die "Template not found: $TEMPLATE_PATH"
+[[ -f "$MCP_CONFIG_PATH" ]]   || die "MCP config not found: $MCP_CONFIG_PATH (see worker-launch.md for the expected format)"
 
 # --- Step 1: Fetch Linear issue ---
 echo ">>> Fetching $issue_id_upper from Linear..."
 
-# Security: write auth header to temp file, pass via -H @file, delete immediately.
-# This prevents the API key from appearing in the process argument list (ps aux).
-auth_file=$(mktemp) || { echo "ERROR: mktemp failed — check disk space and /tmp permissions" >&2; exit 1; }
+auth_file=$(mktemp) || die "mktemp failed; check disk space and /tmp permissions"
 printf 'Authorization: Bearer %s' "$LINEAR_API_KEY" > "$auth_file"
-trap "rm -f '$auth_file'" EXIT
+trap 'rm -f "$auth_file"' EXIT
 
 # Note: Linear uses Float! for issue numbers (not Int!). This is a Linear GraphQL quirk.
-query='{"query":"query($tk:String!,$n:Float!){issues(filter:{team:{key:{eq:$tk}},number:{eq:$n}},first:1){nodes{id identifier title description state{name} project{name}}}}","variables":{"tk":"'"$team_key"'","n":'"$issue_num"'}}'
+query=$(jq -nc --arg tk "$team_key" --argjson n "$issue_num" \
+  '{query:"query($tk:String!,$n:Float!){issues(filter:{team:{key:{eq:$tk}},number:{eq:$n}},first:1){nodes{id identifier title description state{name} project{name} assignee{id email name} labels{nodes{name}}}}}", variables:{tk:$tk,n:$n}}')
 
-response=$(curl -s -X POST https://api.linear.app/graphql \
+response=$(curl -fsS -X POST "$GRAPHQL_URL" \
   -H "Content-Type: application/json" \
   -H @"$auth_file" \
-  -d "$query")
+  -d "$query" 2>/dev/null || echo '{}')
 
 rm -f "$auth_file"
 trap - EXIT
@@ -133,27 +252,77 @@ trap - EXIT
 issue_title=$(printf '%s' "$response" | jq -r '.data.issues.nodes[0].title // empty')
 issue_description=$(printf '%s' "$response" | jq -r '.data.issues.nodes[0].description // ""')
 issue_state=$(printf '%s' "$response" | jq -r '.data.issues.nodes[0].state.name // "Unknown"')
+project_name=$(printf '%s' "$response" | jq -r '.data.issues.nodes[0].project.name // ""')
+assignee_id=$(printf '%s' "$response" | jq -r '.data.issues.nodes[0].assignee.id // ""')
+assignee_email=$(printf '%s' "$response" | jq -r '.data.issues.nodes[0].assignee.email // ""')
+assignee_name=$(printf '%s' "$response" | jq -r '.data.issues.nodes[0].assignee.name // ""')
+issue_labels=$(printf '%s' "$response" | jq -r '.data.issues.nodes[0].labels.nodes[]?.name' | paste -sd ',' -)
 
-if [[ -z "$issue_title" ]]; then
-  echo "ERROR: Issue $issue_id_upper not found in Linear" >&2
-  exit 1
+[[ -n "$issue_title" ]] || die "Issue $issue_id_upper not found in Linear"
+
+if is_terminal_state "$issue_state"; then
+  die "Issue $issue_id_upper is already $issue_state"
 fi
-
-# Guard: don't dispatch against completed issues
-case "$issue_state" in
-  Done|Closed|Cancelled|Canceled|Duplicate)
-    echo "ERROR: Issue $issue_id_upper is already $issue_state" >&2
-    exit 1 ;;
-esac
 
 echo "    Title: $issue_title"
 echo "    State: $issue_state"
+[[ -n "$project_name" ]] && echo "    Project: $project_name"
+[[ -n "$assignee_email" || -n "$assignee_name" ]] && echo "    Assignee: ${assignee_email:-$assignee_name}"
+[[ -n "$issue_labels" ]] && echo "    Labels: $issue_labels"
+
+# --- Routing guardrails ---
+routing_reasons=()
+if csv_contains "$issue_labels" "$REQUIRED_LABEL"; then
+  routing_reasons+=("label")
+fi
+if [[ -n "$ALLOWED_PROJECT_REGEX" ]] && [[ "$project_name" =~ $ALLOWED_PROJECT_REGEX ]]; then
+  routing_reasons+=("project")
+fi
+if assignee_matches "$ALLOWED_ASSIGNEE" "$assignee_id" "$assignee_email" "$assignee_name"; then
+  routing_reasons+=("assignee")
+fi
+
+routing_summary="none"
+if [[ ${#routing_reasons[@]} -gt 0 ]]; then
+  routing_summary=$(IFS=,; echo "${routing_reasons[*]}")
+fi
+
+if truthy "$REQUIRE_ROUTING" && [[ "$allow_unrouted" != "true" ]] && [[ ${#routing_reasons[@]} -eq 0 ]]; then
+  die "Issue $issue_id_upper is not explicitly routed to Claude.
+    Required label: ${REQUIRED_LABEL:-<unset>}
+    Allowed project regex: ${ALLOWED_PROJECT_REGEX:-<unset>}
+    Allowed assignee: ${ALLOWED_ASSIGNEE:-<unset>}
+    Actual project: ${project_name:-<none>}
+    Actual labels: ${issue_labels:-<none>}
+    Actual assignee: ${assignee_email:-${assignee_name:-<none>}}
+    Use --allow-unrouted only for a deliberate trusted dispatch."
+fi
+
+echo "    Routing: $routing_summary"
+echo "    Closeout: $closeout_state"
+
+# --- Derived paths ---
+worktree_path="$WORKSPACES_ROOT/$issue_id_upper"
+run_dir="$RUNS_ROOT/$issue_id_upper"
+
+# --- Dry run exit: no worktree, run directory, prompt, or metadata is created. ---
+if [[ "$dry_run" == true ]]; then
+  echo ""
+  echo "=== DRY RUN ==="
+  echo "Would create worktree: $worktree_path"
+  echo "Would create branch:   $branch from $base_branch"
+  echo "Would render prompt:   $TEMPLATE_PATH"
+  echo "Would launch:          env -i <allowlisted worker env> claude -p <prompt> --model $model --max-turns $max_turns"
+  echo "Would close out as:    $closeout_state"
+  exit 0
+fi
+
+mkdir -p "$run_dir" "$WORKSPACES_ROOT"
 
 # --- Step 2: Create worktree ---
 if [[ "$resume" == true ]]; then
   if [[ ! -d "$worktree_path" ]]; then
-    echo "ERROR: --resume but worktree does not exist: $worktree_path" >&2
-    exit 1
+    die "--resume but worktree does not exist: $worktree_path"
   fi
   echo ">>> Resuming in existing worktree: $worktree_path"
 else
@@ -170,9 +339,8 @@ fi
 # --- Step 3: Render prompt ---
 echo ">>> Rendering prompt..."
 
-# Security: all variable values are written to a JSON file and read by Python,
-# avoiding shell expansion of user-supplied content (especially issue_title
-# and issue_description which can contain backticks, quotes, and dollar signs).
+# Security: values are written to JSON and read by Python. Issue description is
+# passed via stdin, not as a shell argument.
 vars_file=$(mktemp)
 jq -n \
   --arg issue_id "$issue_id_upper" \
@@ -183,144 +351,149 @@ jq -n \
   --arg repo_path "$repo_path" \
   --arg routing_profile "$worktree_path/.orchestration/claude-lane.yaml" \
   --arg model "$model" \
+  --arg closeout_state "$closeout_state" \
   '{issue_id: $issue_id, issue_title: $issue_title, worktree_path: $worktree_path,
     branch: $branch, base_branch: $base_branch, repo_path: $repo_path,
-    routing_profile: $routing_profile, model: $model}' \
+    routing_profile: $routing_profile, model: $model, closeout_state: $closeout_state}' \
   > "$vars_file"
 
-# Issue description passed via stdin — never as a shell argument.
-rendered_prompt=$(printf '%s' "$issue_description" | python3 -c "
-import sys, json
+printf '%s' "$issue_description" | python3 -c '
+import json
+import sys
 
-vars = json.load(open('$vars_file'))
-template = open('$TEMPLATE_PATH').read()
+vars_file = sys.argv[1]
+template_path = sys.argv[2]
+vars = json.load(open(vars_file))
+template = open(template_path).read()
 description = sys.stdin.read()
 
 result = (template
-    .replace('{{ISSUE_ID}}',              vars['issue_id'])
-    .replace('{{ISSUE_TITLE}}',           vars['issue_title'])
-    .replace('{{ISSUE_DESCRIPTION}}',     description)
-    .replace('{{WORKTREE_PATH}}',         vars['worktree_path'])
-    .replace('{{BRANCH}}',               vars['branch'])
-    .replace('{{BASE_BRANCH}}',          vars['base_branch'])
-    .replace('{{REPO_PATH}}',            vars['repo_path'])
-    .replace('{{ROUTING_PROFILE_PATH}}', vars['routing_profile'])
-    .replace('{{MODEL}}',                vars['model'])
+    .replace("{{ISSUE_ID}}",              vars["issue_id"])
+    .replace("{{ISSUE_TITLE}}",           vars["issue_title"])
+    .replace("{{ISSUE_DESCRIPTION}}",     description)
+    .replace("{{WORKTREE_PATH}}",         vars["worktree_path"])
+    .replace("{{BRANCH}}",                vars["branch"])
+    .replace("{{BASE_BRANCH}}",           vars["base_branch"])
+    .replace("{{REPO_PATH}}",             vars["repo_path"])
+    .replace("{{ROUTING_PROFILE_PATH}}",  vars["routing_profile"])
+    .replace("{{MODEL}}",                 vars["model"])
+    .replace("{{CLOSEOUT_STATE}}",        vars["closeout_state"])
 )
 print(result)
-")
+' "$vars_file" "$TEMPLATE_PATH" > "$run_dir/prompt.md"
 
 rm -f "$vars_file"
-printf '%s' "$rendered_prompt" > "$run_dir/prompt.md"
 
 # --- Step 4: Write initial metadata ---
 # Note: the routing profile at .orchestration/claude-lane.yaml must be committed
 # to the repo for it to appear in the worktree.
+start_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cat > "$run_dir/meta.env" <<METAEOF
 issue_id='$issue_id_upper'
 repo_path='$repo_path'
 worktree_path='$worktree_path'
 branch='$branch'
 base_branch='$base_branch'
-start_time='$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+start_time='$start_time'
 model='$model'
 max_turns='$max_turns'
-pid=''
+pid='$$'
 session_id=''
 exit_code=''
 end_time=''
-status='starting'
+status='running'
+closeout_state='$closeout_state'
+routing='$routing_summary'
+integrated='false'
 METAEOF
-
-# --- Dry run exit ---
-if [[ "$dry_run" == true ]]; then
-  echo ""
-  echo "=== DRY RUN ==="
-  echo "Would launch:"
-  echo "  cd $worktree_path"
-  echo "  claude -p <prompt> --model $model --max-turns $max_turns"
-  echo ""
-  echo "Prompt saved to: $run_dir/prompt.md"
-  echo "Metadata saved to: $run_dir/meta.env"
-  exit 0
-fi
 
 # --- Step 5: Launch ---
 finalize() {
   local ec="${1:-$?}"
-
-  # Extract session_id from output stream
   local sid=""
+  local final_status="incomplete"
+  local result_event=""
+
   if [[ -f "$run_dir/output.jsonl" ]]; then
-    sid=$(grep -o '"session_id":"[^"]*"' "$run_dir/output.jsonl" 2>/dev/null \
-      | tail -1 | sed 's/"session_id":"//;s/"//' || true)
+    sid=$(jq -r 'select(.type == "result") | .session_id // empty' \
+      "$run_dir/output.jsonl" 2>/dev/null | tail -1 || true)
+    if [[ -z "$sid" ]]; then
+      sid=$(jq -r 'select(.type == "system") | .sessionId // empty' \
+        "$run_dir/output.jsonl" 2>/dev/null | head -1 || true)
+    fi
+    result_event=$(jq -c 'select(.type == "result")' "$run_dir/output.jsonl" 2>/dev/null | tail -1 || true)
   fi
 
-  # Validate session_id: only hex digits and hyphens
+  # Validate session_id: only hex digits and hyphens.
   if [[ -n "$sid" ]] && ! printf '%s' "$sid" | grep -qE '^[a-f0-9A-F-]+$'; then
     sid=""
   fi
 
-  # Determine final status from the last result event
-  local final_status="incomplete"
-  if [[ -f "$run_dir/output.jsonl" ]]; then
-    local last_result
-    last_result=$(grep '"type":"result"' "$run_dir/output.jsonl" 2>/dev/null | tail -1 || true)
-    if [[ -n "$last_result" ]]; then
-      local is_error
-      is_error=$(printf '%s' "$last_result" | jq -r '.is_error // true' 2>/dev/null || echo "true")
-      if [[ "$is_error" == "false" ]]; then
-        final_status="completed"
-      else
-        final_status="failed"
-      fi
+  if [[ -n "$result_event" ]]; then
+    local is_error subtype
+    is_error=$(printf '%s' "$result_event" | jq -r '.is_error // false' 2>/dev/null || echo "true")
+    subtype=$(printf '%s' "$result_event" | jq -r '.subtype // "unknown"' 2>/dev/null || echo "unknown")
+    if [[ "$is_error" == "false" && "$subtype" == "success" ]]; then
+      final_status="completed"
+    else
+      final_status="failed"
     fi
+  elif [[ "$ec" != "0" ]]; then
+    final_status="failed"
   fi
 
-  # Rewrite meta.env atomically (write to temp, then mv)
+  # Rewrite meta.env atomically (write to temp, then mv).
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "${run_dir}/meta.env.XXXXXX")
   cat > "$tmp" <<METAEOF2
 issue_id='$issue_id_upper'
 repo_path='$repo_path'
 worktree_path='$worktree_path'
 branch='$branch'
 base_branch='$base_branch'
-start_time='$(grep "^start_time=" "$run_dir/meta.env" | sed "s/^start_time='//;s/'$//")'
+start_time='$start_time'
 model='$model'
 max_turns='$max_turns'
-pid='$$'
+pid=''
 session_id='$sid'
 exit_code='$ec'
 end_time='$(date -u +%Y-%m-%dT%H:%M:%SZ)'
 status='$final_status'
+closeout_state='$closeout_state'
+routing='$routing_summary'
+integrated='false'
 METAEOF2
   mv "$tmp" "$run_dir/meta.env"
 
   echo ""
   echo ">>> Worker finished: $final_status (exit code: $ec)"
   if [[ "$final_status" == "failed" && -n "$sid" ]]; then
-    echo "    Resume: claude --resume $sid"
+    echo "    Resume: cd $worktree_path && claude --resume $sid"
   fi
 }
 
-# Trap both SIGTERM and SIGINT — both record exit code 143 for simplicity.
-trap 'finalize 143' SIGTERM SIGINT
+# Trap both SIGTERM and SIGINT and still record metadata.
+trap 'finalize 143; exit 143' SIGTERM SIGINT
 
 echo ">>> Launching claude -p (model: $model, max-turns: $max_turns)..."
 
-# Working directory is the worktree, not the source repo.
-# The rendered prompt is saved to $run_dir/prompt.md and passed as a file
-# reference to avoid ARG_MAX limits with large issue bodies.
 cd "$worktree_path"
-claude -p "$(cat "$run_dir/prompt.md")" \
-    --model "$model" \
-    --name "claude-worker-${issue_id_lower}" \
-    --mcp-config "$MCP_CONFIG_PATH" \
-    --dangerously-skip-permissions \
-    --max-turns "$max_turns" \
-    --output-format stream-json \
-    --verbose \
-    > "$run_dir/output.jsonl" 2>&1 || true
+claude_env=(env -i)
+for env_name in $WORKER_ENV_ALLOWLIST; do
+  append_env_arg "$env_name"
+done
 
-finalize $?
+worker_exit=0
+"${claude_env[@]}" claude -p "$(cat "$run_dir/prompt.md")" \
+  --model "$model" \
+  --name "claude-worker-${issue_id_lower}" \
+  --mcp-config "$MCP_CONFIG_PATH" \
+  --dangerously-skip-permissions \
+  --max-turns "$max_turns" \
+  --output-format stream-json \
+  --verbose \
+  > "$run_dir/output.jsonl" 2>&1 || worker_exit=$?
+
+trap - SIGTERM SIGINT
+finalize "$worker_exit"
+exit "$worker_exit"
