@@ -1,7 +1,7 @@
 # Symphony + Claude Lane
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Agent Skill](https://img.shields.io/badge/Agent_Skill-v2.0.0-8A2BE2.svg)](#install)
+[![Agent Skill](https://img.shields.io/badge/Agent_Skill-v2.0.1-8A2BE2.svg)](#install)
 
 ![Symphony + Claude Lane](assets/social-preview.png)
 
@@ -160,6 +160,7 @@ Those decisions belong in the adopter repo, not in this shared skill.
 | `skills/.../assets/claude-lane-profile.example.yaml` | Example repo-local routing profile |
 | `skills/.../assets/claude-lane-guidance.snippet.md` | Starter snippet for adopter repo orchestration docs |
 | `skills/.../assets/claude-worker.reference.sh` | Reference launcher script (adapt to your environment) |
+| `skills/.../assets/review-audit.reference.py` | Reference parser for current and legacy outcome comments |
 | `skills/.../assets/worker-prompt.template.md` | Worker prompt template with trust boundary, capabilities, and closeout protocol |
 | `skills/.../assets/linear-outcome-block.example.md` | Example machine-readable closeout comments |
 | `skills/.../agents/openai.yaml` | Skill metadata |
@@ -179,6 +180,9 @@ Those decisions belong in the adopter repo, not in this shared skill.
 - **Worker environment allowlists** instead of inheriting the full operator shell
 - **No-side-effect dry-runs** for launcher validation
 - **Safe non-deletion** when issue state cannot be confirmed
+- **Closeout verification** so launcher/status tooling distinguishes `claude -p` success from verified tracker state
+- **Outcome parser compatibility** for current `symphony-outcome` blocks and legacy `symphony:outcome verdict=pass` comments during migration
+- **Dry-run prompt validation** without leaving worktree or run artifacts
 - **Security/privacy hygiene** so secrets, tokens, and personal data stay out of artifacts
 
 ## Scope boundaries
@@ -186,6 +190,8 @@ Those decisions belong in the adopter repo, not in this shared skill.
 This is a **portable blueprint** with a reference implementation, not a turnkey production system.
 
 It includes a **reference launcher script** (`claude-worker.reference.sh`) and **worker launch docs** (`references/worker-launch.md`) that show the full secure launch pattern. Adapt these to your environment.
+
+The reference launcher uses `claude -p` in non-interactive mode. It redirects the rendered prompt through stdin rather than putting the full issue body in the process argument list. If your local Claude Code version requires an argv prompt, document that exposure and avoid sensitive issue bodies in Claude-routed tickets.
 
 It does **not** bundle:
 

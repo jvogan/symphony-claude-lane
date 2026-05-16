@@ -22,6 +22,7 @@ Self-close is reasonable only when:
 - cleanup behavior will not destroy unreviewed work
 - outcome comments are machine-readable and consistently posted
 - issue-tracker state can be checked reliably at closeout time
+- status tooling records and surfaces closeout mismatches, not just process success
 
 ## Snapshot-style repos
 
@@ -78,6 +79,40 @@ At minimum, capture:
 - files touched
 - validation summary
 - suggested next action when the work is incomplete
+
+## Outcome parser compatibility
+
+The recommended current format is:
+
+```text
+<!-- symphony-outcome
+status: success
+-->
+```
+
+During migrations, audit tools may also recognize legacy comments such as:
+
+```text
+<!-- symphony:outcome verdict=pass -->
+```
+
+Parser precedence should be conservative:
+
+- a current `symphony-outcome` block with `status: failed` or `status: blocked` is a failure, even if older text elsewhere says pass
+- a current `symphony-outcome` block with `status: success` is a pass candidate
+- legacy `symphony:outcome verdict=pass|verified|ok` is a pass candidate only when no current failure or blocked block is present
+- unknown or malformed comments should not be auto-promoted
+
+The reference parser in `assets/review-audit.reference.py` demonstrates this classification without making network calls or hardcoding any adopter-specific labels, project names, or campaign names.
+
+## Closeout verification
+
+A completed `claude -p` process is not the same as verified tracker closeout. Launchers or status tools should record:
+
+- `closeout_verified`: `unchecked`, `true`, `false`, `check_failed`, or `not_applicable`
+- `linear_state_actual`: the tracker state observed after the worker exits
+
+Treat `false` and `check_failed` as review warnings. Preserve worktrees and artifacts until an operator or audit job confirms the intended state and integration status.
 
 ## Retry and resume
 

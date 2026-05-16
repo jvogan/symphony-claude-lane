@@ -22,6 +22,8 @@ Symphony (Elixir) dispatches Codex workers — managing worktrees, scheduling, a
 - **Routing Profile**: A repo-local YAML file (`.orchestration/claude-lane.yaml`) that records model selection criteria, label overrides, privacy rules, guardrails, and cleanup policy.
 - **Visual Verification**: Playwright-first browser verification for tickets affecting rendered output.
 - **Fail-Closed Worker Launch**: Claude launchers should require an explicit Claude route, pass only an allowlisted environment, render an explicit closeout state, and keep dry-runs free of worktree/run artifacts.
+- **Closeout Verification**: A successful `claude -p` process is not proof that the tracker reached the requested state. Launchers should record actual tracker state and surface mismatches.
+- **Outcome Parser Compatibility**: New workers emit `symphony-outcome`; audit tools may support legacy `symphony:outcome verdict=pass` comments while refusing current failed or blocked outcomes.
 
 ## When to prefer Claude
 
@@ -59,6 +61,7 @@ Inspect repo -> confirm multi-model candidate -> confirm base workflow has guard
 - `skills/symphony-claude-lane/assets/claude-lane-profile.example.yaml` — example routing profile with model selection criteria
 - `skills/symphony-claude-lane/assets/claude-lane-guidance.snippet.md` — starter guidance for adopter repo orchestration docs
 - `skills/symphony-claude-lane/assets/claude-worker.reference.sh` — reference launcher script (adapt to your environment)
+- `skills/symphony-claude-lane/assets/review-audit.reference.py` — reference parser for current and legacy outcome comments
 - `skills/symphony-claude-lane/assets/worker-prompt.template.md` — worker prompt template with trust boundary, capabilities, and closeout protocol
 - `skills/symphony-claude-lane/assets/linear-outcome-block.example.md` — example structured closeout comments
 

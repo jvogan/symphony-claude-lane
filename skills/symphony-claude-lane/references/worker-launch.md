@@ -80,11 +80,24 @@ exit_code=''
 end_time=''
 status='starting'
 closeout_state='In Review'
+self_close_requested='false'
+closeout_verified='unchecked'
+linear_state_actual=''
 routing='label'
 integrated='false'
 ```
 
 **Security:** All values are single-quoted. This file must **never** be `source`d — always parse with `grep + sed`. A worker that writes malicious content to its run directory must not be able to execute arbitrary code through the status or cleanup scripts.
+
+`closeout_verified` should use a small explicit vocabulary:
+
+- `unchecked`: launcher has not yet verified tracker state
+- `true`: worker completed and the issue reached the requested closeout state
+- `false`: worker completed but the issue did not reach the requested state
+- `check_failed`: tracker state could not be checked
+- `not_applicable`: worker did not complete successfully
+
+Status and health tooling should surface `false` and `check_failed` as warnings. A prompt instructing the worker to move an issue is not proof that the tracker state changed.
 
 ### Step 5 — Launch `claude -p`
 
@@ -99,7 +112,7 @@ env -i \
     ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}" \
     CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
     CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}" \
-    claude -p "$RENDERED_PROMPT" \
+    claude -p \
     --model "$MODEL" \
     --name "claude-worker-${ISSUE_ID_LOWER}" \
     --mcp-config "$MCP_CONFIG_PATH" \
@@ -107,6 +120,7 @@ env -i \
     --max-turns "$MAX_TURNS" \
     --output-format stream-json \
     --verbose \
+    < "$RUNS_ROOT/$ISSUE_ID/prompt.md" \
     > "$RUNS_ROOT/$ISSUE_ID/output.jsonl" 2>&1
 ```
 
@@ -125,7 +139,9 @@ Key flags:
 
 **Environment:** Prefer an allowlisted environment instead of inheriting the operator's full shell. Include only what the worker needs: `HOME`, `PATH`, `SSH_AUTH_SOCK` for git over SSH, `LINEAR_API_KEY`, Claude auth/config variables, locale variables, temp directory variables, and browser automation paths when needed.
 
-**Dry run:** A safe `--dry-run` should validate the issue and routing, then print the worktree, branch, model, closeout state, and launch command without creating a worktree, run directory, prompt, or metadata.
+**Prompt exposure:** `claude -p` accepts a prompt as an argument, but putting the full rendered prompt in argv can expose issue text and local paths in process listings. Prefer redirecting the saved prompt file into stdin as shown above. If an adopter's Claude Code version requires an argv prompt, document that exposure and avoid putting sensitive issue bodies in worker-routed tickets.
+
+**Dry run:** A safe `--dry-run` should validate the issue and routing, render the prompt to a temporary file, verify the `<issue_body>` trust boundary is present, then print the worktree, branch, model, closeout state, and launch command without creating a worktree, run directory, prompt, or metadata.
 
 **Background mode (optional):** If your orchestrator needs non-blocking dispatch, wrap the launch in a subshell backgrounded with `&`. Write the PID to `$RUNS_ROOT/$ISSUE_ID/worker.pid` atomically from inside the subshell. The outer process reads back the PID and exits. The reference launcher runs in foreground by default — adapt to background if needed.
 
@@ -136,8 +152,11 @@ After `claude -p` exits:
 1. Parse `output.jsonl` for the last `result` event to extract `session_id` and determine status.
 2. **Validate `session_id`** against `/^[a-f0-9A-F-]+$/` before writing to meta.env — prevents injection of shell metacharacters through the output stream.
 3. Determine final status: `is_error=false` + `subtype=success` → `completed`; otherwise `failed`; no result event → `incomplete`.
-4. Rewrite `meta.env` atomically (write to temp file, then `mv`).
-5. If the session failed and a valid `session_id` was found, print the resume command: `claude --resume <session_id>`.
+4. If the worker completed, re-query Linear and compare the actual issue state to the rendered closeout state. Record `closeout_verified` and `linear_state_actual`.
+5. Rewrite `meta.env` atomically (write to temp file, then `mv`).
+6. If the session failed and a valid `session_id` was found, print the resume command: `claude --resume <session_id>`.
+
+For trackers with eventual consistency, adopters may add a short retry window before recording `false`, but the launcher should still fail closed: if state cannot be confirmed, record `check_failed` and preserve artifacts for operator review.
 
 **Signal handling:** Trap `SIGTERM`/`SIGINT` to set exit code 143 and still run finalization, ensuring metadata and session ID are captured even on kill or timeout.
 
@@ -169,6 +188,7 @@ Scan `$RUNS_ROOT/*/meta.env` for active runs:
 2. Liveness check: `kill -0 $pid` to detect if the worker process is still running.
 3. Optionally re-query Linear for current issue state.
 4. Compute elapsed time from `start_time`.
+5. Surface `closeout_verified=false` and `closeout_verified=check_failed` as warnings instead of assuming `claude -p` success means the issue was moved correctly.
 
 ## Cleanup
 
@@ -213,3 +233,5 @@ The worktree and branch are preserved. The worker picks up where it left off.
 | Environment allowlist | Prevents full operator shell env from leaking to workers |
 | Explicit closeout state | Prevents issue text from choosing `Done` vs `In Review` |
 | `--max-turns` hard cap | Prevents runaway sessions from burning unlimited tokens |
+| Prompt via stdin, not argv | Reduces exposure of issue body and local paths in process listings |
+| Closeout verification metadata | Separates worker success from verified tracker state |

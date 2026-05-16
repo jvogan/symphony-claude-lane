@@ -45,9 +45,12 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Launch Claude workers with an allowlisted environment rather than inheriting the full operator shell.
 - Prefer operator-reviewed closeout unless the adopter already has a safe self-close path.
 - Render the intended closeout state into the worker prompt so issue text cannot choose `Done` versus `In Review`.
+- Verify tracker state after worker success when self-close or worker-driven closeout is allowed. Surface `closeout_verified=false` or `check_failed` as warnings.
+- Support current `symphony-outcome` comments and legacy `symphony:outcome verdict=pass` comments during migration, but never auto-promote current failed or blocked outcomes.
 - If issue state cannot be confirmed during closeout or cleanup, preserve artifacts and stop rather than guessing.
 - Do not assume every adopter's storage pressure looks the same; document repo-specific cleanup hotspots in the repo-local profile.
 - Do not put secrets, credentials, tokens, session cookies, personal data, or raw customer payloads into issues, comments, screenshots, traces, or other artifacts.
+- Do not launch paid cloud resources from worker tickets unless the issue explicitly authorizes budget, time limit, cleanup, validation, and expected artifacts.
 
 ## Reference map
 

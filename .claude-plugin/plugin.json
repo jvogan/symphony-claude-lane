@@ -1,7 +1,7 @@
 {
   "name": "symphony-claude-lane",
   "description": "Smart multi-model dispatch for OpenAI Symphony + Linear workflows. Route tasks to Claude Code or Codex based on what each task requires.",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": {
     "name": "Contributors"
   },

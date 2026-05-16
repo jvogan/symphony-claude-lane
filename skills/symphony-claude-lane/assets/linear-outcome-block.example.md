@@ -1,5 +1,7 @@
 Use a machine-readable outcome block in the final issue comment so multi-model workflows can be monitored consistently.
 
+Use `symphony-outcome` for new comments. Audit tooling can support legacy `symphony:outcome verdict=pass|verified|ok` comments during migration, but new workers should emit the current block below. A current `status: failed` or `status: blocked` must never be auto-promoted as a pass.
+
 ## Success
 
 ```text

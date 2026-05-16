@@ -25,10 +25,13 @@ queue_strategy: shared-project-labels
 worker_launcher:
   require_explicit_routing: true
   required_label: lane:claude
-  allowed_project_regex: Claude
+  # Keep unset by default. Project-regex routing can be useful, but it is broad
+  # enough that adopters should opt in deliberately.
+  allowed_project_regex: null
   allowed_assignee: null
   inherit_full_environment: false
   dry_run_creates_artifacts: false
+  dry_run_validates_rendered_prompt: true
 
 # --- Model selection criteria ---
 # These guide the orchestrator when routing_strategy is task-characteristic.
@@ -107,6 +110,9 @@ privacy_rules:
   redact_issue_bodies_and_comments: true
   redact_screenshots_and_traces: true
   avoid_raw_customer_payloads: true
+  redact_local_paths: true
+  redact_private_queue_or_campaign_names: true
+  secret_scan_before_artifact_share: true
 
 # Default closeout policy.
 closeout_mode:
@@ -114,6 +120,9 @@ closeout_mode:
   worker_success_state: In Review
   self_close_state: Done
   on_control_plane_failure: preserve-artifacts
+  verify_closeout_state: true
+  preserve_on_closeout_mismatch: true
+  support_legacy_outcome_parser: true
   allow_self_close_for:
     - direct-branch
     - direct-pr

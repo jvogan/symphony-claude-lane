@@ -43,7 +43,7 @@
 #   CLAUDE_SELF_CLOSE_STATE   Self-close state when --self-close is used (default: Done)
 #   CLAUDE_REQUIRE_ROUTING    Require a label/project/assignee guard (default: true)
 #   CLAUDE_REQUIRED_LABEL     Required Linear label option (default: lane:claude)
-#   CLAUDE_ALLOWED_PROJECT_REGEX  Allowed Linear project regex (default: Claude)
+#   CLAUDE_ALLOWED_PROJECT_REGEX  Allowed Linear project regex (default: unset)
 #   CLAUDE_ALLOWED_ASSIGNEE   Allowed assignee id, email, or name (default: unset)
 #   CLAUDE_WORKER_ENV_ALLOWLIST   Space-separated env vars passed to claude
 #
@@ -119,6 +119,27 @@ is_terminal_state() {
   return 1
 }
 
+query_issue_state() {
+  local query_team_key="$1"
+  local query_issue_num="$2"
+  local response state header_file query_payload
+
+  header_file=$(mktemp) || return 1
+  printf 'Authorization: Bearer %s' "$LINEAR_API_KEY" > "$header_file"
+  query_payload=$(jq -nc --arg tk "$query_team_key" --argjson n "$query_issue_num" \
+    '{query:"query($tk:String!,$n:Float!){issues(filter:{team:{key:{eq:$tk}},number:{eq:$n}},first:1){nodes{state{name}}}}", variables:{tk:$tk,n:$n}}')
+
+  response=$(curl -fsS -X POST "$GRAPHQL_URL" \
+    -H "Content-Type: application/json" \
+    -H @"$header_file" \
+    -d "$query_payload" 2>/dev/null || true)
+  rm -f "$header_file"
+
+  state=$(printf '%s' "${response:-{}}" | jq -r '.data.issues.nodes[0].state.name // empty' 2>/dev/null || true)
+  [[ -n "$state" ]] || return 1
+  printf '%s' "$state"
+}
+
 append_env_arg() {
   local var_name="$1"
   [[ "$var_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 0
@@ -134,6 +155,55 @@ abspath_from_launch_cwd() {
   esac
 }
 
+render_prompt_file() {
+  local output_path="$1"
+  local vars_file
+
+  vars_file=$(mktemp) || die "mktemp failed; check disk space and /tmp permissions"
+  jq -n \
+    --arg issue_id "$issue_id_upper" \
+    --arg issue_title "$issue_title" \
+    --arg worktree_path "$worktree_path" \
+    --arg branch "$branch" \
+    --arg base_branch "$base_branch" \
+    --arg repo_path "$repo_path" \
+    --arg routing_profile "$worktree_path/.orchestration/claude-lane.yaml" \
+    --arg model "$model" \
+    --arg closeout_state "$closeout_state" \
+    '{issue_id: $issue_id, issue_title: $issue_title, worktree_path: $worktree_path,
+      branch: $branch, base_branch: $base_branch, repo_path: $repo_path,
+      routing_profile: $routing_profile, model: $model, closeout_state: $closeout_state}' \
+    > "$vars_file"
+
+  # Security: issue description is passed via stdin, not as a shell argument.
+  printf '%s' "$issue_description" | python3 -c '
+import json
+import sys
+
+vars_file = sys.argv[1]
+template_path = sys.argv[2]
+vars = json.load(open(vars_file))
+template = open(template_path).read()
+description = sys.stdin.read()
+
+result = (template
+    .replace("{{ISSUE_ID}}",              vars["issue_id"])
+    .replace("{{ISSUE_TITLE}}",           vars["issue_title"])
+    .replace("{{ISSUE_DESCRIPTION}}",     description)
+    .replace("{{WORKTREE_PATH}}",         vars["worktree_path"])
+    .replace("{{BRANCH}}",                vars["branch"])
+    .replace("{{BASE_BRANCH}}",           vars["base_branch"])
+    .replace("{{REPO_PATH}}",             vars["repo_path"])
+    .replace("{{ROUTING_PROFILE_PATH}}",  vars["routing_profile"])
+    .replace("{{MODEL}}",                 vars["model"])
+    .replace("{{CLOSEOUT_STATE}}",        vars["closeout_state"])
+)
+print(result)
+' "$vars_file" "$TEMPLATE_PATH" > "$output_path"
+
+  rm -f "$vars_file"
+}
+
 # --- Configuration (adapt these to your environment) ---
 WORKSPACES_ROOT="${CLAUDE_WORKSPACES_ROOT:-./workspaces}"
 RUNS_ROOT="${CLAUDE_RUNS_ROOT:-./runs}"
@@ -145,7 +215,7 @@ DEFAULT_CLOSEOUT_STATE="${CLAUDE_CLOSEOUT_STATE:-In Review}"
 DEFAULT_SELF_CLOSE_STATE="${CLAUDE_SELF_CLOSE_STATE:-Done}"
 REQUIRE_ROUTING="${CLAUDE_REQUIRE_ROUTING:-true}"
 REQUIRED_LABEL="${CLAUDE_REQUIRED_LABEL:-lane:claude}"
-ALLOWED_PROJECT_REGEX="${CLAUDE_ALLOWED_PROJECT_REGEX:-Claude}"
+ALLOWED_PROJECT_REGEX="${CLAUDE_ALLOWED_PROJECT_REGEX:-}"
 ALLOWED_ASSIGNEE="${CLAUDE_ALLOWED_ASSIGNEE:-}"
 WORKER_ENV_ALLOWLIST="${CLAUDE_WORKER_ENV_ALLOWLIST:-HOME PATH SHELL TMPDIR USER LOGNAME LANG LC_ALL LC_CTYPE SSH_AUTH_SOCK LINEAR_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR XDG_CONFIG_HOME XDG_CACHE_HOME PLAYWRIGHT_BROWSERS_PATH}"
 
@@ -175,6 +245,7 @@ closeout_state="$DEFAULT_CLOSEOUT_STATE"
 resume=false
 dry_run=false
 allow_unrouted=false
+self_close_requested=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -183,7 +254,7 @@ while [[ $# -gt 0 ]]; do
     --model)     model="${2:?--model requires a value}"; shift 2 ;;
     --max-turns) max_turns="${2:?--max-turns requires a value}"; shift 2 ;;
     --closeout)  closeout_state="${2:?--closeout requires a value}"; shift 2 ;;
-    --self-close) closeout_state="$DEFAULT_SELF_CLOSE_STATE"; shift ;;
+    --self-close) closeout_state="$DEFAULT_SELF_CLOSE_STATE"; self_close_requested=true; shift ;;
     --allow-unrouted) allow_unrouted=true; shift ;;
     --resume)    resume=true; shift ;;
     --dry-run)   dry_run=true; shift ;;
@@ -307,13 +378,20 @@ run_dir="$RUNS_ROOT/$issue_id_upper"
 
 # --- Dry run exit: no worktree, run directory, prompt, or metadata is created. ---
 if [[ "$dry_run" == true ]]; then
+  dry_prompt=$(mktemp) || die "mktemp failed; check disk space and /tmp permissions"
+  render_prompt_file "$dry_prompt"
+  grep -q '<issue_body>' "$dry_prompt" || die "Rendered prompt is missing <issue_body> boundary"
+  grep -q '</issue_body>' "$dry_prompt" || die "Rendered prompt is missing </issue_body> boundary"
+  rm -f "$dry_prompt"
+
   echo ""
   echo "=== DRY RUN ==="
   echo "Would create worktree: $worktree_path"
   echo "Would create branch:   $branch from $base_branch"
-  echo "Would render prompt:   $TEMPLATE_PATH"
-  echo "Would launch:          env -i <allowlisted worker env> claude -p <prompt> --model $model --max-turns $max_turns"
+  echo "Would render prompt:   $TEMPLATE_PATH (validated in a temporary file)"
+  echo "Would launch:          env -i <allowlisted worker env> claude -p < prompt.md --model $model --max-turns $max_turns"
   echo "Would close out as:    $closeout_state"
+  echo "Would self-close:      $self_close_requested"
   exit 0
 fi
 
@@ -338,51 +416,7 @@ fi
 
 # --- Step 3: Render prompt ---
 echo ">>> Rendering prompt..."
-
-# Security: values are written to JSON and read by Python. Issue description is
-# passed via stdin, not as a shell argument.
-vars_file=$(mktemp)
-jq -n \
-  --arg issue_id "$issue_id_upper" \
-  --arg issue_title "$issue_title" \
-  --arg worktree_path "$worktree_path" \
-  --arg branch "$branch" \
-  --arg base_branch "$base_branch" \
-  --arg repo_path "$repo_path" \
-  --arg routing_profile "$worktree_path/.orchestration/claude-lane.yaml" \
-  --arg model "$model" \
-  --arg closeout_state "$closeout_state" \
-  '{issue_id: $issue_id, issue_title: $issue_title, worktree_path: $worktree_path,
-    branch: $branch, base_branch: $base_branch, repo_path: $repo_path,
-    routing_profile: $routing_profile, model: $model, closeout_state: $closeout_state}' \
-  > "$vars_file"
-
-printf '%s' "$issue_description" | python3 -c '
-import json
-import sys
-
-vars_file = sys.argv[1]
-template_path = sys.argv[2]
-vars = json.load(open(vars_file))
-template = open(template_path).read()
-description = sys.stdin.read()
-
-result = (template
-    .replace("{{ISSUE_ID}}",              vars["issue_id"])
-    .replace("{{ISSUE_TITLE}}",           vars["issue_title"])
-    .replace("{{ISSUE_DESCRIPTION}}",     description)
-    .replace("{{WORKTREE_PATH}}",         vars["worktree_path"])
-    .replace("{{BRANCH}}",                vars["branch"])
-    .replace("{{BASE_BRANCH}}",           vars["base_branch"])
-    .replace("{{REPO_PATH}}",             vars["repo_path"])
-    .replace("{{ROUTING_PROFILE_PATH}}",  vars["routing_profile"])
-    .replace("{{MODEL}}",                 vars["model"])
-    .replace("{{CLOSEOUT_STATE}}",        vars["closeout_state"])
-)
-print(result)
-' "$vars_file" "$TEMPLATE_PATH" > "$run_dir/prompt.md"
-
-rm -f "$vars_file"
+render_prompt_file "$run_dir/prompt.md"
 
 # --- Step 4: Write initial metadata ---
 # Note: the routing profile at .orchestration/claude-lane.yaml must be committed
@@ -403,6 +437,9 @@ exit_code=''
 end_time=''
 status='running'
 closeout_state='$closeout_state'
+self_close_requested='$self_close_requested'
+closeout_verified='unchecked'
+linear_state_actual=''
 routing='$routing_summary'
 integrated='false'
 METAEOF
@@ -413,6 +450,8 @@ finalize() {
   local sid=""
   local final_status="incomplete"
   local result_event=""
+  local linear_state_actual=""
+  local closeout_verified="not_applicable"
 
   if [[ -f "$run_dir/output.jsonl" ]]; then
     sid=$(jq -r 'select(.type == "result") | .session_id // empty' \
@@ -442,6 +481,20 @@ finalize() {
     final_status="failed"
   fi
 
+  if [[ "$final_status" == "completed" ]]; then
+    if linear_state_actual=$(query_issue_state "$team_key" "$issue_num" 2>/dev/null); then
+      linear_state_actual="${linear_state_actual//\'/}"
+      if [[ "$linear_state_actual" == "$closeout_state" ]]; then
+        closeout_verified="true"
+      else
+        closeout_verified="false"
+      fi
+    else
+      linear_state_actual=""
+      closeout_verified="check_failed"
+    fi
+  fi
+
   # Rewrite meta.env atomically (write to temp, then mv).
   local tmp
   tmp=$(mktemp "${run_dir}/meta.env.XXXXXX")
@@ -460,6 +513,9 @@ exit_code='$ec'
 end_time='$(date -u +%Y-%m-%dT%H:%M:%SZ)'
 status='$final_status'
 closeout_state='$closeout_state'
+self_close_requested='$self_close_requested'
+closeout_verified='$closeout_verified'
+linear_state_actual='$linear_state_actual'
 routing='$routing_summary'
 integrated='false'
 METAEOF2
@@ -467,6 +523,10 @@ METAEOF2
 
   echo ""
   echo ">>> Worker finished: $final_status (exit code: $ec)"
+  if [[ "$final_status" == "completed" ]]; then
+    echo "    Closeout verified: $closeout_verified"
+    [[ -n "$linear_state_actual" ]] && echo "    Linear state: $linear_state_actual"
+  fi
   if [[ "$final_status" == "failed" && -n "$sid" ]]; then
     echo "    Resume: cd $worktree_path && claude --resume $sid"
   fi
@@ -484,7 +544,7 @@ for env_name in $WORKER_ENV_ALLOWLIST; do
 done
 
 worker_exit=0
-"${claude_env[@]}" claude -p "$(cat "$run_dir/prompt.md")" \
+"${claude_env[@]}" claude -p \
   --model "$model" \
   --name "claude-worker-${issue_id_lower}" \
   --mcp-config "$MCP_CONFIG_PATH" \
@@ -492,6 +552,7 @@ worker_exit=0
   --max-turns "$max_turns" \
   --output-format stream-json \
   --verbose \
+  < "$run_dir/prompt.md" \
   > "$run_dir/output.jsonl" 2>&1 || worker_exit=$?
 
 trap - SIGTERM SIGINT
