@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-config:
+    name: Shell, JSON, and regression tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Check shell syntax
+        run: |
+          bash -n \
+            env.sh \
+            bin/claude-doctor \
+            bin/claude-version \
+            bin/claude-tmux-finalize \
+            tests/test_mcp_runpod_optin.sh \
+            tests/test_tmux_sentinel_malformed.sh \
+            tests/test_env_isolation.sh \
+            skills/symphony-claude-lane/assets/claude-worker.reference.sh
+
+      - name: Validate JSON configs
+        run: |
+          find . -path './.git' -prune -o \( -name '*.json' -o -name 'marketplace.json' \) -type f -print \
+            | sort \
+            | xargs -n1 jq empty
+
+      - name: Run isolated regression tests
+        run: |
+          bash tests/test_tmux_sentinel_malformed.sh
+          bash tests/test_mcp_runpod_optin.sh
+          bash tests/test_env_isolation.sh

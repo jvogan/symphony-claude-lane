@@ -1,14 +1,14 @@
 ---
 name: symphony-claude-lane
-description: Teach an orchestrator smart multi-model dispatch for Symphony + Linear workflows. Use when an agent needs to route tasks to Claude or Codex based on task characteristics, create a durable routing profile, and define visual verification, privacy, and closeout rules for a mixed-model repo.
+description: Teach an orchestrator long-horizon multi-agent dispatch for Symphony + Linear workflows. Use when an agent needs to route tasks to Claude Code or Codex by task characteristics, choose a tmux or headless Claude backend, create a durable routing profile, and define visual verification, privacy, closeout, and cleanup rules.
 metadata:
-  short-description: Smart multi-model dispatch for Symphony + Linear
-  version: "3.0.0"
+  short-description: Long-horizon multi-agent orchestration via Linear
+  version: "3.0.0-rc2"
 ---
 
 # Symphony + Claude Lane
 
-Use this skill when a team has **Symphony + Linear** and wants their orchestrator to **pick the right agent for each task** — routing work to Claude Code or Codex based on what the task actually needs, not just a static label.
+Use this skill when a team has **Symphony + Linear** and wants a durable **long-horizon multi-agent harness** — routing work to Claude Code or Codex based on what the task actually needs, not just a static label.
 
 This skill also works for teams that want to run **Claude-only** workers without Codex.
 
@@ -27,11 +27,11 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 2. Confirm the repo is a real candidate for multi-model dispatch, not just a generic coding repo.
 3. Confirm the base Symphony workflow already has workspace bootstrap assertions, a no-progress stop-loss, and a stable issue contract before adding model routing.
 4. Analyze the repo's work patterns to recommend a routing strategy. Consider what types of tasks appear in the backlog: bounded implementation, UI/frontend, complex reasoning, browser-dependent verification, code review, documentation, security-sensitive changes, E2E testing.
-5. Ask the user about their routing preferences: should the orchestrator analyze task characteristics automatically, or use label-only routing? Which agent capabilities matter most for this repo? Is this a mixed-model or Claude-only setup?
+5. Ask the user about their routing and backend preferences: should the orchestrator analyze task characteristics automatically, or use label-only routing? Which agent capabilities matter most for this repo? Is this a mixed-model or Claude-only setup? Should Claude workers use the default tmux-backed interactive backend, or does the adopter intentionally prefer a headless `claude -p` / API-priced backend?
 6. Create or update a repo-local routing profile from `assets/claude-lane-profile.example.yaml`, including routing strategy, model selection criteria, privacy rules, and cleanup or retention rules for that adopter's actual storage hotspots.
 7. Prefer same-project label-filtered routing when labels are used. Recommend a separate queue or Linear project only when the adopter needs stronger operational separation.
 8. Add routing and dispatch guidance to the target repo's orchestration docs. Use `assets/claude-lane-guidance.snippet.md` as a starting point. Do not hardcode repo specifics back into this shared skill.
-9. Help the adopter set up Claude worker launch capability. Use `references/worker-launch.md` for the secure launch pattern and `assets/claude-worker.reference.sh` as a starting point for the launcher script. Use `assets/worker-prompt.template.md` as the basis for worker prompts. Adapt all paths, auth, and MCP config to the adopter's environment.
+9. Help the adopter set up Claude worker launch capability. Use `references/worker-launch.md` for the secure tmux launch pattern and `assets/claude-worker.reference.sh` as a starting point for the launcher script. If the adopter prefers API pricing or a fully headless subprocess, read `../../docs/backend-options.md` and adapt deliberately rather than mixing semantics. Use `assets/worker-prompt.template.md` as the basis for worker prompts. Adapt all paths, auth, and MCP config to the adopter's environment.
 10. For tickets that affect rendered output, default to Playwright-based verification before closeout.
 11. Define closeout, retry, `In Review`, and cleanup behavior as part of the routing contract, including how worktrees, snapshots, and other heavy local artifacts are removed safely.
 
@@ -44,6 +44,7 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Inherit the base workflow guardrails instead of treating any model's lane as exempt from them.
 - Require an explicit Claude route before launching a full-access Claude worker. Labels, project filters, or assignee filters are acceptable portable guards.
 - Launch Claude workers with an allowlisted environment rather than inheriting the full operator shell.
+- Treat the backend as an explicit design choice. Tmux is the default for attachable long-horizon workers; `claude -p` is acceptable only when the adopter intentionally wants API-priced headless execution and preserves the same routing, prompt, outcome, closeout, and cleanup contracts.
 - Prefer operator-reviewed closeout unless the adopter already has a safe self-close path.
 - Render the intended closeout state into the worker prompt so issue text cannot choose `Done` versus `In Review`.
 - Verify tracker state after worker success when self-close or worker-driven closeout is allowed. Surface `closeout_verified=false` or `check_failed` as warnings.
@@ -59,6 +60,7 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Read `references/routing.md` before analyzing work patterns or asking the user about routing preferences.
 - Read `references/dispatch.md` when defining queue split, model selection, and worker lifecycle.
 - Read `references/worker-launch.md` when helping the adopter set up the Claude worker launcher, MCP config, or security practices.
+- Read `../../docs/backend-options.md` when the adopter asks about tmux versus `claude -p`, API pricing, or a hybrid backend.
 - Read `references/visual-verification.md` before writing browser-verification policy.
 - Read `references/closeout.md` when defining `In Review`, outcome blocks, retry behavior, or self-close rules.
 - Read `references/troubleshooting.md` when a worker stalls, exhausts turns, or drifts from the routing contract.
@@ -71,6 +73,7 @@ When this skill is applied well, the target repo should end up with:
 - a working Claude worker launch setup (launcher script, MCP config, prompt template)
 - a durable routing profile with model selection criteria
 - clear routing rules — task-characteristic analysis, label overrides, or both
+- explicit Claude backend selection — tmux by default, `claude -p` by deliberate adaptation, or a hybrid split
 - explicit privacy and redaction rules for all worker artifacts
 - repo-local orchestration guidance describing what each model handles and why
 - a Playwright-first visual verification rule for tickets that affect rendered output

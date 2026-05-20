@@ -16,6 +16,8 @@ The trade-off: there is no exit code. Completion signaling moves to the sentinel
 
 The launch pattern is the same whether you run mixed-model (Claude + Codex) or Claude-only.
 
+If an adopter explicitly wants API-priced, headless `claude -p` execution instead, treat that as a different backend. Keep the routing, prompt safety, outcome, closeout, and cleanup contracts, but adapt launch, status, and completion parsing deliberately; see `docs/backend-options.md` in the repo root.
+
 ## Launch sequence
 
 ### Step 1 — Fetch the issue

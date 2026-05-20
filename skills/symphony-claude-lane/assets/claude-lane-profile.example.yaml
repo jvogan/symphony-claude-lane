@@ -19,6 +19,22 @@ claude_only: false
 # - separate-project
 queue_strategy: shared-project-labels
 
+# Claude launch backend.
+# - tmux: interactive Claude Code in an attachable tmux session (default)
+# - claude-p: headless `claude -p` subprocess for teams that prefer API pricing
+# - hybrid: route some task classes to tmux and some to `claude -p`
+backend_selection:
+  default: tmux
+  use_claude_p_when:
+    - headless_batch_task
+    - no_browser_or_tui_needed
+    - api_pricing_preferred
+  use_tmux_when:
+    - long_horizon_task
+    - visual_verification
+    - operator_may_need_to_attach
+    - complex_debugging
+
 # Launcher-level dispatch guardrails. A Claude worker should not launch for an
 # arbitrary Linear issue unless at least one of these guards matches, or the
 # operator deliberately passes an override such as --allow-unrouted.

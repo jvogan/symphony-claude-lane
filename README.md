@@ -1,9 +1,10 @@
 # Symphony + Claude Lane
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Agent Skill](https://img.shields.io/badge/Agent_Skill-v3.0.0-8A2BE2.svg)](#install)
+[![CI](https://github.com/jvogan/symphony-claude-lane/actions/workflows/test.yml/badge.svg)](https://github.com/jvogan/symphony-claude-lane/actions/workflows/test.yml)
+[![Agent Skill](https://img.shields.io/badge/Agent_Skill-v3.0.0--rc2-8A2BE2.svg)](#install)
 
-![Symphony + Claude Lane](assets/social-preview.png)
+![Symphony + Claude Lane](assets/banner.jpg)
 
 **Long-horizon multi-agent orchestration via Linear. Claude Code workers run subscription-billed in attachable tmux sessions, optionally paired with Codex via Symphony.**
 
@@ -25,7 +26,11 @@ You install the skill, point it at a repo, and your orchestrator agent learns ho
                 (shared issues & state)
 ```
 
-> **v3.0.0:** Claude workers now run as interactive sessions in tmux panes instead of `claude -p` subprocesses. This bills against the operator's Claude subscription (not the Agent SDK credit bucket) and matches the normal interactive session model. Workers signal completion by writing a JSON sentinel file. See [`docs/migration-v2-to-v3.md`](docs/migration-v2-to-v3.md) for the migration story.
+> **Current release candidate: v3.0.0-rc2.** The default backend runs Claude workers as interactive sessions in tmux panes instead of `claude -p` subprocesses. This bills against the operator's Claude subscription, matches the normal interactive session model, and gives operators attachable long-running workers. Teams that prefer API-priced / headless `claude -p` can adapt the launcher intentionally; see [`docs/backend-options.md`](docs/backend-options.md).
+
+## Why this exists
+
+Long-horizon AI work needs more than "send one prompt and hope." Complex product, infrastructure, and research tasks need a harness: durable issue state, isolated worktrees, observable workers, model-specific routing, validation evidence, closeout checks, and cleanup rules. This skill turns Linear into the shared control plane for that harness, with Claude Code handling work that benefits from visual judgment, deep reasoning, browser verification, or external tools, and Codex/Symphony handling bounded parallel implementation when that is the better fit.
 
 ## Why run both?
 
@@ -40,7 +45,13 @@ Different AI agents have different strengths. Running both against the same Line
 | Documentation, product copy | Parallelizable batch of similar tasks |
 | E2E tests (sandbox-incompatible) | Fast execution where speed > judgment |
 
-The skill also supports **Claude-only** setups for teams that don't use Codex. No API plumbing required — both Codex and Claude Code are subscription tools with built-in agent capabilities.
+The skill also supports **Claude-only** setups for teams that don't use Codex. With the default tmux backend, no API plumbing is required — both Codex and Claude Code are subscription tools with built-in agent capabilities.
+
+## Backend choice
+
+The bundled reference launcher defaults to **tmux-backed interactive Claude Code** because it is attachable, observable, and subscription-billed. It is the recommended path for long-running workers.
+
+If your team prefers API-priced or fully headless execution, keep the same routing profile, Linear state machine, prompt-injection boundary, outcome block, and cleanup rules, then adapt the launcher back to a deliberate `claude -p` subprocess backend. The skill includes migration notes for both directions in [`docs/backend-options.md`](docs/backend-options.md); the important part is choosing one backend explicitly and keeping its billing, observability, and completion semantics documented.
 
 ## Prerequisites
 
@@ -80,6 +91,26 @@ Copy the skill folder into your project, then add it as a context reference in y
 <!-- In your project's CLAUDE.md -->
 See @skills/symphony-claude-lane/SKILL.md for multi-model routing.
 ```
+
+## 60-second quickstart
+
+```bash
+git clone https://github.com/jvogan/symphony-claude-lane.git
+cd symphony-claude-lane
+export LINEAR_API_KEY="<linear-api-key>"
+source ./env.sh
+bin/claude-doctor
+```
+
+Then install the skill into your agent, add the `lane:claude` label in Linear, and ask the agent to configure your target repo:
+
+```text
+Use $symphony-claude-lane to set up long-horizon multi-agent routing for this
+Symphony + Linear repo. Use tmux-backed Claude workers by default, preserve
+Codex/Symphony for bounded parallel work, and document closeout and cleanup.
+```
+
+For the expanded setup path, see [`docs/quickstart.md`](docs/quickstart.md).
 
 ## How it works
 
@@ -142,6 +173,7 @@ The skill creates or updates a repo-local routing file:
 That file records the adopter's decisions about:
 
 - routing strategy: task-characteristic analysis or label-only
+- backend selection: tmux by default, `claude -p` by deliberate adaptation, or a hybrid split
 - model selection criteria: what task characteristics prefer Claude vs Codex
 - label overrides: which labels always route to a specific model
 - whether this is a mixed-model or Claude-only setup
@@ -174,8 +206,9 @@ Those decisions belong in the adopter repo, not in this shared skill.
 | `mcp/worker-mcp.json` | Default MCP config (Linear only) |
 | `mcp/worker-mcp-runpod.json` | Opt-in MCP config (Linear + RunPod) |
 | `settings/claude-settings.tmux.json` | Per-worktree `.claude/settings.json` with `bypassPermissions` |
-| `tests/` | Two fully-isolated regression tests (sentinel-malformed + MCP opt-in) |
+| `tests/` | Three fully-isolated regression tests (sentinel-malformed, MCP opt-in, env isolation) |
 | `docs/architecture.md` | Sentinel JSON contract, dispatch lock semantics, autoset-marker pattern |
+| `docs/backend-options.md` | How to choose tmux, `claude -p`, or a hybrid backend intentionally |
 | `docs/lessons.md` | Bug-by-bug postmortems from the tmux backend build |
 | `docs/linear-setup.md` | How to set up `lane:claude` + `model:*` labels in a Linear workspace |
 | `docs/migration-v2-to-v3.md` | What changes if you adopted v2.0.1 |
@@ -241,6 +274,28 @@ Adopters should treat cleanup as part of the routing design:
 - monitor disk usage during larger waves
 - make sure cleanup fails closed when tracker state cannot be confirmed
 - record repo-specific storage hotspots in the routing profile
+
+## FAQ
+
+### How do I run Claude Code workers from Linear issues?
+
+Use Linear labels, projects, or assignee filters to route issues to Claude, then launch a worker into an isolated git worktree. The tmux reference launcher reads the issue, renders a bounded worker prompt, starts `claude` in an attachable tmux session, and waits for `bin/claude-tmux-finalize` to write the completion sentinel.
+
+### How is this different from `claude -p`?
+
+`claude -p` is headless and API-priced; tmux-backed Claude Code is interactive, attachable, and subscription-billed. The default reference launcher uses tmux because it is better for long-horizon work where an operator may need to observe or recover a live session. If you prefer API pricing or a fully non-interactive subprocess, adapt the launcher using [`docs/backend-options.md`](docs/backend-options.md).
+
+### Can I use this without Codex?
+
+Yes. In Claude-only mode, Linear is still the control plane and this skill still gives you routing profiles, closeout rules, prompt safety, visual verification guidance, and cleanup policy. Symphony/Codex becomes optional instead of required.
+
+### Why use Linear as the control plane?
+
+Long-running multi-agent work needs durable state outside any one chat or terminal. Linear gives operators a shared queue, assignment and label controls, status transitions, and a permanent audit trail for outcomes.
+
+### How are RunPod credentials isolated?
+
+RunPod is opt-in at two layers: MCP tools are only loaded from `mcp/worker-mcp-runpod.json`, and RunPod environment variables only enter the worker allowlist when `CLAUDE_WORKER_ENABLE_RUNPOD=true`. The default worker environment excludes `RUNPOD_API_KEY`.
 
 ## Related
 

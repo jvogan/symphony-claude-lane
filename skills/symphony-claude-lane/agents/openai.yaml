@@ -1,7 +1,7 @@
 interface:
   display_name: "Symphony + Claude Lane"
-  short_description: "Smart multi-model dispatch for Symphony + Linear"
-  default_prompt: "Use $symphony-claude-lane to set up smart multi-model routing for this Symphony + Linear repo — analyze task characteristics to pick the right agent (Claude or Codex) for each issue, persist the routing profile, and document closeout, privacy, and model selection behavior."
+  short_description: "Long-horizon multi-agent orchestration via Linear"
+  default_prompt: "Use $symphony-claude-lane to set up long-horizon multi-agent routing for this Symphony + Linear repo — analyze task characteristics to pick the right agent (Claude Code or Codex) for each issue, choose the Claude backend deliberately (tmux by default, claude -p if API-priced headless execution is preferred), persist the routing profile, and document closeout, privacy, cleanup, and model selection behavior."
 dependencies:
   tools:
     - type: "mcp"

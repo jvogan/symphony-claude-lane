@@ -4,6 +4,8 @@ The patterns the v0.8.x hardening round produced for the tmux backend. This doc 
 
 ## Why tmux instead of `claude -p`
 
+Tmux is the maintained default backend because it is the best fit for attachable, long-horizon worker sessions. Teams that intentionally prefer API-priced, headless execution can adapt the same routing and closeout contracts back to `claude -p`; see [`backend-options.md`](backend-options.md).
+
 Three reasons:
 
 1. **Billing.** Interactive Claude Code sessions bill against the operator's Claude subscription. `claude -p` subprocess invocations bill against the Agent SDK credit bucket. For long-running batch work, the subscription model is dramatically cheaper.

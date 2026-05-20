@@ -101,7 +101,7 @@ Everything in the routing and Linear story carries forward unchanged:
 
 ## What's gone
 
-- The `claude -p` invocation pattern (removed entirely; no dual-track in v3)
+- The `claude -p` invocation pattern is removed from the maintained reference launcher. It can still be reintroduced deliberately when a team wants API-priced headless execution; see [`backend-options.md`](backend-options.md).
 - `output.jsonl` parsing for the `result` event
 - `claude --resume <session_id>` advice (replaced by `tmux attach`)
 - The `--max-turns` flag is **kept** (Claude accepts it in interactive mode too)
@@ -112,6 +112,6 @@ Everything in the routing and Linear story carries forward unchanged:
 Two reasons:
 
 1. **The reference launcher fundamentally changes shape.** The v2 launcher's launch block, output parsing, and resume mechanics all become inapplicable in tmux. An operator who copied the v2 launcher and ran it against v3 docs would have a confused tool.
-2. **Subscription-billing was a real driver.** Anthropic's Agent SDK billing model made `claude -p` increasingly expensive for batch workloads. The tmux backend's subscription billing is the path forward.
+2. **Subscription-billing was a real driver.** Anthropic's Agent SDK billing model made `claude -p` increasingly expensive for batch workloads. The tmux backend's subscription billing is the maintained default path for v3.
 
-v2 is end-of-life. Security and correctness fixes only land on v3+.
+The shipped v2-style launcher is end-of-life. Security and correctness fixes only land on v3+.

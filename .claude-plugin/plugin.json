@@ -1,7 +1,7 @@
 {
   "name": "symphony-claude-lane",
-  "description": "Smart multi-model dispatch for OpenAI Symphony + Linear workflows. Route tasks to Claude Code or Codex based on what each task requires.",
-  "version": "3.0.0",
+  "description": "Long-horizon multi-agent orchestration via Linear. Route Claude Code and Codex workers by task characteristics with tmux or headless backend options.",
+  "version": "3.0.0-rc2",
   "author": {
     "name": "Contributors"
   },
@@ -14,6 +14,11 @@
     "linear",
     "orchestration",
     "multi-model",
+    "multi-agent",
+    "long-horizon",
+    "claude-code",
+    "tmux",
+    "mcp",
     "routing",
     "agent-skill"
   ]

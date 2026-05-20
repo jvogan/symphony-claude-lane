@@ -1,10 +1,10 @@
 # Symphony + Claude Lane
 
-> Long-horizon multi-agent orchestration via Linear. Claude Code workers run subscription-billed in attachable tmux sessions, optionally paired with Codex via Symphony. This installable Agent Skill adds the Claude lane: Symphony dispatches Codex workers through its Elixir runtime; this skill adds Claude workers as **interactive sessions in detached tmux panes**, tracked through the same Linear backlog, with smart routing that sends each task to the right agent. As of v3.0.0 the documented backend is tmux (replacing the v2.x `claude -p` model); see docs/migration-v2-to-v3.md for the migration story.
+> Long-horizon multi-agent orchestration via Linear. Claude Code workers run subscription-billed in attachable tmux sessions, optionally paired with Codex via Symphony. This installable Agent Skill adds the Claude lane: Symphony dispatches Codex workers through its Elixir runtime; this skill adds Claude workers as **interactive sessions in detached tmux panes**, tracked through the same Linear backlog, with smart routing that sends each task to the right agent. As of v3.0.0-rc2 the default backend is tmux; teams that intentionally prefer API-priced headless execution can adapt the launcher to `claude -p` while preserving the same routing and closeout contracts. See docs/backend-options.md.
 
 ## What this is
 
-A skill you install into an AI coding agent (Codex or Claude Code) that teaches the orchestrator how to run Claude workers alongside Symphony's Codex workers. Once installed, your agent can analyze each issue's characteristics, pick the best model, launch Claude workers securely in isolated git worktrees, create a durable routing profile, and define visual verification, privacy, and closeout rules. Also supports Claude-only setups without Codex. No API plumbing required — both Codex and Claude Code are subscription tools with built-in agent capabilities.
+A skill you install into an AI coding agent (Codex or Claude Code) that teaches the orchestrator how to run Claude workers alongside Symphony's Codex workers. Once installed, your agent can analyze each issue's characteristics, pick the best model, launch Claude workers securely in isolated git worktrees, create a durable routing profile, and define visual verification, privacy, closeout, and cleanup rules. Also supports Claude-only setups without Codex.
 
 ## Who this is for
 

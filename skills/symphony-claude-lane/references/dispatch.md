@@ -16,6 +16,17 @@ When `routing_strategy` is `label-only`, skip characteristic analysis and route 
 
 When `claude_only` is true, route all tasks to Claude.
 
+## Backend selection
+
+For Claude-routed tasks, treat backend selection as part of dispatch:
+
+- use `backend_selection.default` from `.orchestration/claude-lane.yaml`
+- prefer `tmux` for long-horizon work, browser verification, complex debugging, and any task where an operator may need to attach to the live session
+- use `claude-p` only when the adopter intentionally wants API-priced, headless subprocess execution and has adapted launch, status, output parsing, and closeout semantics accordingly
+- record the chosen backend in run metadata so status and cleanup tooling can branch on it
+
+Do not silently fall back between backends. A failed tmux launch and a failed `claude -p` launch have different recovery paths.
+
 ## Queue split
 
 Use a **distinct active queue contract** for each model's tasks.

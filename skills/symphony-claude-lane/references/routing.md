@@ -57,6 +57,7 @@ Before configuring routing, ask:
 6. Should visual verification be mandatory for all frontend tickets, or only a subset?
 7. Is operator review required before `Done`, or can some tickets self-close?
 8. Should the routing stay in the same Linear project with label filters, or use a separate project?
+9. Should Claude workers use the default tmux backend, headless `claude -p`, or a hybrid split?
 
 Do not guess these when the repo has no prior guidance. Persist the answers.
 
@@ -67,6 +68,7 @@ If the user does not answer, use this fallback:
 - prefer Codex for bounded implementation, config, tests, and refactors
 - keep `ask_on_ambiguous_tickets: true`
 - default closeout to `in-review`
+- default Claude backend to tmux
 - note the assumptions in the repo-local guidance so future operators can revisit them
 
 ## Persisting the answers
@@ -84,6 +86,7 @@ The profile should become the durable contract for:
 - routing strategy (task-characteristic or label-only)
 - model selection criteria (prefer_claude_when, prefer_codex_when)
 - label overrides (always_route, never_route)
+- backend selection (tmux, `claude -p`, or hybrid)
 - visual verification expectations
 - preferred models
 - inherited base guardrails
