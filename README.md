@@ -5,7 +5,7 @@
 
 ![Symphony + Claude Lane](assets/social-preview.png)
 
-**Run Claude Code workers alongside Codex in your Symphony + Linear workflow.**
+**Long-horizon multi-agent orchestration via Linear. Claude Code workers run subscription-billed in attachable tmux sessions, optionally paired with Codex via Symphony.**
 
 [Symphony](https://github.com/openai/symphony) dispatches [Codex](https://openai.com/index/codex/) workers through its Elixir runtime. This [agent skill](https://agentskills.io/specification) adds [Claude Code](https://docs.anthropic.com/en/docs/claude-code) workers to the same workflow — running as **interactive sessions inside detached tmux panes** in isolated git worktrees, tracked through the same [Linear](https://linear.app) backlog, with smart routing that sends each task to the agent best suited for it.
 
