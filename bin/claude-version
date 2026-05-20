@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# claude-version — Print install commit, env defaults, and claude CLI version.
+set -euo pipefail
+
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+
+# Get current git branch
+git_branch=$(cd "$SYMPHONY_CLAUDE_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+# Get current git commit (short SHA)
+git_commit=$(cd "$SYMPHONY_CLAUDE_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+# Get claude CLI version
+claude_version=$(command -v claude > /dev/null 2>&1 && claude --version 2>&1 || echo "(not found)")
+
+# Output sections in exact order
+echo "symphony-claude-lane:"
+echo "  root=$SYMPHONY_CLAUDE_ROOT"
+echo "  branch=$git_branch"
+echo "  commit=$git_commit"
+echo ""
+echo "Worker defaults:"
+echo "  CLAUDE_WORKER_MODEL=$CLAUDE_WORKER_MODEL"
+echo "  CLAUDE_WORKER_MODEL_OPUS=$CLAUDE_WORKER_MODEL_OPUS"
+echo "  CLAUDE_WORKER_MODEL_SONNET=$CLAUDE_WORKER_MODEL_SONNET"
+echo "  CLAUDE_WORKER_MODEL_HAIKU=$CLAUDE_WORKER_MODEL_HAIKU"
+echo "  CLAUDE_WORKER_MAX_TURNS=$CLAUDE_WORKER_MAX_TURNS"
+echo ""
+echo "claude CLI:"
+echo "  $claude_version"

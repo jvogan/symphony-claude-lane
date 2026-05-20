@@ -1,0 +1,12 @@
+{
+  "$comment_purpose": "Per-worktree Claude Code settings for the tmux-backed Claude worker lane. The dispatcher copies this file into <worktree>/.claude/settings.json before starting the tmux session. With bypassPermissions, Claude will not prompt for tool approval — the trust model is bounded by: (1) the routing guards in the dispatcher that validate the issue is allowed to dispatch a Claude worker, (2) the worktree boundary, (3) the per-issue branch.",
+  "$comment_verify": "Schema verified against Claude Code as of 2026-05-16. If a future Claude Code release renames keys, update this file and the dispatcher's --permission-mode launch flag in lockstep.",
+
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+
+  "env": {
+    "$comment": "Reserved for per-worktree env hints. Most variables come from the dispatcher's allowlisted exec env."
+  }
+}

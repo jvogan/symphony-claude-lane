@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# claude-tmux-finalize — Worker-invoked helper that writes the completion sentinel.
+#
+# Invoked by the Claude worker as its final step inside a tmux-backed session,
+# AFTER the worker has posted the outcome comment to Linear and moved the issue
+# to the configured closeout state. The dispatcher polls for the sentinel file
+# to know the run is complete and the tmux session is safe to tear down.
+#
+# The sentinel JSON is atomic (temp file + rename) so the dispatcher never sees
+# a partial write.
+#
+# Usage:
+#   claude-tmux-finalize --status completed [options]
+#   claude-tmux-finalize --status failed --exit-reason blocker --notes "..."
+#
+# Discovery of the sentinel path:
+#   1. --sentinel PATH (explicit)
+#   2. $CLAUDE_TMUX_SENTINEL_PATH (set by the dispatcher into the worker env)
+#   3. $PWD/.symphony-done (fallback for manual debug invocations)
+#
+# Worker prompts should pass the sentinel path explicitly because env vars set
+# in the dispatcher's tmux session may not be visible to nested shells the
+# worker spawns.
+set -euo pipefail
+
+VERSION=1
+
+# ---------- Defaults ----------
+sentinel=""
+status=""
+files_touched=""
+validation_summary=""
+exit_reason="normal"
+notes=""
+session_id=""
+outcome_posted="false"
+
+usage() {
+  cat >&2 <<EOF
+Usage: $(basename "$0") --status {completed|failed} [options]
+
+Required:
+  --status {completed|failed}  Final worker status
+
+Sentinel path (one of):
+  --sentinel PATH              Explicit sentinel file path
+  \$CLAUDE_TMUX_SENTINEL_PATH   Env var (set by the dispatcher)
+  (fallback)                   \$PWD/.symphony-done
+
+Optional metadata:
+  --files-touched LIST         Comma-separated list of files
+  --validation-summary TEXT    One-line test/build/lint summary
+  --exit-reason REASON         normal | blocker | timeout | partial (default: normal)
+  --notes TEXT                 Free-form notes for the operator
+  --session-id ID              Claude session ID if available
+  --outcome-posted             Flag: outcome comment was posted to Linear
+
+  -h, --help                   Show this help
+EOF
+}
+
+die() { echo "claude-tmux-finalize: error: $*" >&2; exit 2; }
+
+# ---------- Argument parsing ----------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sentinel)            sentinel="${2:?--sentinel requires a path}"; shift 2 ;;
+    --status)              status="${2:?--status requires completed|failed}"; shift 2 ;;
+    --files-touched)       files_touched="${2:-}"; shift 2 ;;
+    --validation-summary)  validation_summary="${2:-}"; shift 2 ;;
+    --exit-reason)         exit_reason="${2:-normal}"; shift 2 ;;
+    --notes)               notes="${2:-}"; shift 2 ;;
+    --session-id)          session_id="${2:-}"; shift 2 ;;
+    --outcome-posted)      outcome_posted="true"; shift ;;
+    -h|--help)             usage; exit 0 ;;
+    *)                     die "unknown argument: $1" ;;
+  esac
+done
+
+# ---------- Validation ----------
+case "$status" in
+  completed|failed) ;;
+  "") die "--status is required (completed|failed)" ;;
+  *) die "--status must be 'completed' or 'failed', got: $status" ;;
+esac
+
+case "$exit_reason" in
+  normal|blocker|timeout|partial) ;;
+  *) die "--exit-reason must be one of: normal, blocker, timeout, partial (got: $exit_reason)" ;;
+esac
+
+if [[ -z "$sentinel" ]]; then
+  sentinel="${CLAUDE_TMUX_SENTINEL_PATH:-}"
+fi
+if [[ -z "$sentinel" ]]; then
+  sentinel="$PWD/.symphony-done"
+fi
+
+# Refuse to write to a path that looks dangerous (no /tmp/-relative, no
+# bare filename in /). The sentinel should live inside a run directory.
+case "$sentinel" in
+  /*) ;;
+  *) die "sentinel path must be absolute: $sentinel" ;;
+esac
+
+sentinel_dir="$(dirname "$sentinel")"
+[[ -d "$sentinel_dir" ]] || die "sentinel directory does not exist: $sentinel_dir"
+[[ -w "$sentinel_dir" ]] || die "sentinel directory is not writable: $sentinel_dir"
+
+command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
+
+# ---------- Compose sentinel JSON ----------
+ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# jq does all the quoting/escaping correctly; never use here-strings for JSON.
+payload="$(jq -nc \
+  --argjson version "$VERSION" \
+  --arg status "$status" \
+  --arg exit_reason "$exit_reason" \
+  --arg ended_at "$ended_at" \
+  --arg files_touched "$files_touched" \
+  --arg validation_summary "$validation_summary" \
+  --arg notes "$notes" \
+  --arg session_id "$session_id" \
+  --argjson outcome_posted "$outcome_posted" \
+  '{
+    sentinel_version: $version,
+    status: $status,
+    exit_reason: $exit_reason,
+    ended_at: $ended_at,
+    outcome_posted: $outcome_posted,
+    files_touched: (if $files_touched == "" then null else $files_touched end),
+    validation_summary: (if $validation_summary == "" then null else $validation_summary end),
+    notes: (if $notes == "" then null else $notes end),
+    session_id: (if $session_id == "" then null else $session_id end)
+  }')"
+
+# ---------- Atomic write ----------
+tmp_path="$(mktemp "${sentinel}.XXXXXX")"
+trap 'rm -f "$tmp_path"' EXIT
+printf '%s\n' "$payload" > "$tmp_path"
+mv "$tmp_path" "$sentinel"
+trap - EXIT
+
+# ---------- Confirmation (visible in tmux pane and transcript) ----------
+echo "[claude-tmux-finalize] wrote sentinel: $sentinel (status=$status, exit_reason=$exit_reason)"
+echo "[claude-tmux-finalize] dispatcher will now finalize meta.env and tear down the tmux session."
+echo "[claude-tmux-finalize] type /exit to close this Claude session."

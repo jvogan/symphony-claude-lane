@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# claude-doctor — Preflight battery for the symphony-claude-lane.
+#
+# First command a new operator should run after `source env.sh` to verify the
+# lane is functional. Emits PASS / FAIL / WARN per check with a summary.
+# Exit 0 iff zero FAILs. WARN does not affect exit code.
+set -uo pipefail
+
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+
+# ---------- Output helpers ----------
+PASS_COUNT=0
+FAIL_COUNT=0
+WARN_COUNT=0
+
+if [[ -t 1 ]]; then
+  C_GREEN=$'\033[32m'
+  C_RED=$'\033[31m'
+  C_YELLOW=$'\033[33m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_RESET=$'\033[0m'
+else
+  C_GREEN=""; C_RED=""; C_YELLOW=""; C_BOLD=""; C_DIM=""; C_RESET=""
+fi
+
+pass() {
+  printf '  %s✓ PASS%s %s\n' "$C_GREEN" "$C_RESET" "$1"
+  PASS_COUNT=$((PASS_COUNT + 1))
+}
+fail() {
+  printf '  %s✗ FAIL%s %s\n' "$C_RED" "$C_RESET" "$1"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+warn() {
+  printf '  %s⚠ WARN%s %s\n' "$C_YELLOW" "$C_RESET" "$1"
+  WARN_COUNT=$((WARN_COUNT + 1))
+}
+section() {
+  printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"
+}
+
+# Check that a var name is set + non-empty. Returns 0 = pass, 1 = fail.
+check_var_set() {
+  local name="$1"
+  local value="${!name-}"
+  if [[ -n "$value" ]]; then
+    pass "$name set"
+    return 0
+  fi
+  fail "$name is unset or empty"
+  return 1
+}
+
+# Check that a var names a writable directory. On a fresh clone the runtime
+# dirs (workspaces/, runs/, logs/) won't exist yet — that's expected. If the
+# directory is missing but the parent is writable, declare it a PASS (the
+# launcher will create it on first dispatch). Only FAIL when the path is
+# genuinely unusable (parent missing, parent not writable, path exists as a
+# non-directory, or directory exists but is read-only).
+check_var_writable_dir() {
+  local name="$1"
+  local value="${!name-}"
+  if [[ -z "$value" ]]; then
+    fail "$name is unset or empty"
+    return 1
+  fi
+  if [[ -e "$value" && ! -d "$value" ]]; then
+    fail "$name=$value — exists but is not a directory"
+    return 1
+  fi
+  if [[ -d "$value" ]]; then
+    if [[ ! -w "$value" ]]; then
+      fail "$name=$value — not writable"
+      return 1
+    fi
+    pass "$name=$value (writable dir)"
+    return 0
+  fi
+  # Directory does not exist yet — check that the parent is writable so the
+  # launcher can create it on first dispatch.
+  local parent
+  parent="$(dirname "$value")"
+  if [[ ! -d "$parent" ]]; then
+    fail "$name=$value — parent dir $parent does not exist"
+    return 1
+  fi
+  if [[ ! -w "$parent" ]]; then
+    fail "$name=$value — parent dir $parent is not writable"
+    return 1
+  fi
+  pass "$name=$value (will be created on first launch; parent writable)"
+}
+
+check_cmd() {
+  local cmd="$1"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    pass "$cmd installed ($(command -v "$cmd"))"
+    return 0
+  fi
+  fail "$cmd not found on PATH"
+  return 1
+}
+
+# ---------- Banner ----------
+printf '%sclaude-doctor%s — symphony-claude-lane preflight\n' "$C_BOLD" "$C_RESET"
+printf '%sroot: %s%s\n' "$C_DIM" "${SYMPHONY_CLAUDE_ROOT:-?}" "$C_RESET"
+
+# ---------- Section 1: env vars ----------
+section "1. Environment variables"
+
+check_var_set LINEAR_API_KEY
+check_var_set CLAUDE_WORKER_MODEL
+check_var_set CLAUDE_WORKER_MODEL_OPUS
+check_var_set CLAUDE_WORKER_MODEL_SONNET
+check_var_set CLAUDE_WORKER_MODEL_HAIKU
+check_var_writable_dir CLAUDE_RUNS_ROOT
+check_var_writable_dir CLAUDE_WORKSPACES_ROOT
+check_var_writable_dir CLAUDE_LOGS_ROOT
+
+# ---------- Section 2: dependencies ----------
+section "2. Dependencies"
+
+check_cmd tmux
+check_cmd git
+check_cmd jq
+
+if command -v claude >/dev/null 2>&1; then
+  if claude_version_out="$(claude --version 2>&1)" && [[ -n "$claude_version_out" ]]; then
+    # First line only — claude --version sometimes prints extra notices.
+    claude_version_line="$(printf '%s\n' "$claude_version_out" | head -n1)"
+    pass "claude CLI installed ($claude_version_line)"
+  else
+    fail "claude --version exited non-zero"
+  fi
+else
+  fail "claude not found on PATH"
+fi
+
+# ---------- Section 3: config files ----------
+section "3. Config files"
+
+# AUTONOMY_ROOT is optional. If set, we expect to be able to read its env.sh
+# (where an upstream Symphony orchestration env lives). If unset, no warning —
+# this is the common public configuration.
+if [[ -n "${AUTONOMY_ROOT:-}" ]]; then
+  autonomy_env="${AUTONOMY_ROOT}/env.sh"
+  if [[ -r "$autonomy_env" ]]; then
+    pass "\$AUTONOMY_ROOT/env.sh readable ($autonomy_env)"
+  else
+    warn "\$AUTONOMY_ROOT/env.sh missing or unreadable ($autonomy_env)"
+  fi
+fi
+
+mcp_config="${CLAUDE_WORKER_MCP_CONFIG:-}"
+if [[ -z "$mcp_config" ]]; then
+  fail "CLAUDE_WORKER_MCP_CONFIG is unset"
+elif [[ ! -r "$mcp_config" ]]; then
+  fail "MCP config not readable: $mcp_config"
+elif ! jq empty "$mcp_config" >/dev/null 2>&1; then
+  fail "MCP config is not valid JSON: $mcp_config"
+else
+  pass "MCP config valid JSON ($mcp_config)"
+fi
+
+# ---------- Section 4: Linear connectivity ----------
+section "4. Linear connectivity"
+
+required_label="${CLAUDE_REQUIRED_LABEL:-lane:claude}"
+
+if [[ -z "${LINEAR_API_KEY:-}" ]]; then
+  fail "Skipping Linear checks — LINEAR_API_KEY not set"
+elif ! command -v curl >/dev/null 2>&1; then
+  fail "Skipping Linear checks — curl not found on PATH"
+else
+  GRAPHQL_URL="https://api.linear.app/graphql"
+  header_file="$(mktemp)"
+  trap 'rm -f "$header_file"' EXIT
+  printf 'Authorization: %s' "$LINEAR_API_KEY" > "$header_file"
+
+  # --- viewer probe ---
+  viewer_body='{"query":"query{viewer{id name}}"}'
+  viewer_resp_file="$(mktemp)"
+  viewer_http=$(curl -sS -o "$viewer_resp_file" -w '%{http_code}' \
+    "$GRAPHQL_URL" \
+    -H @"$header_file" \
+    -H "Content-Type: application/json" \
+    --data "$viewer_body" 2>/dev/null || echo "000")
+
+  viewer_id="$(jq -r '.data.viewer.id // empty' < "$viewer_resp_file" 2>/dev/null || true)"
+  viewer_name="$(jq -r '.data.viewer.name // empty' < "$viewer_resp_file" 2>/dev/null || true)"
+  viewer_err="$(jq -r '.errors[0].message // empty' < "$viewer_resp_file" 2>/dev/null || true)"
+
+  if [[ "$viewer_http" == "200" && -n "$viewer_id" ]]; then
+    pass "Linear viewer query: ${viewer_name:-?} ($viewer_id)"
+  else
+    msg="HTTP $viewer_http"
+    [[ -n "$viewer_err" ]] && msg="$msg — $viewer_err"
+    fail "Linear viewer query failed: $msg"
+  fi
+  rm -f "$viewer_resp_file"
+
+  # --- required-label probe (uses $CLAUDE_REQUIRED_LABEL) ---
+  # Use parameterized GraphQL so the label string is safely escaped.
+  label_body=$(jq -cn --arg label "$required_label" \
+    '{
+      query: "query($name: String!){issueLabels(filter:{name:{eq: $name}}){nodes{id name}}}",
+      variables: {name: $label}
+    }')
+  label_resp_file="$(mktemp)"
+  label_http=$(curl -sS -o "$label_resp_file" -w '%{http_code}' \
+    "$GRAPHQL_URL" \
+    -H @"$header_file" \
+    -H "Content-Type: application/json" \
+    --data "$label_body" 2>/dev/null || echo "000")
+  label_count="$(jq -r '.data.issueLabels.nodes | length // 0' < "$label_resp_file" 2>/dev/null || echo 0)"
+  label_err="$(jq -r '.errors[0].message // empty' < "$label_resp_file" 2>/dev/null || true)"
+
+  if [[ "$label_http" == "200" && "$label_count" -gt 0 ]]; then
+    pass "workspace label \`$required_label\` exists"
+  elif [[ "$label_http" == "200" ]]; then
+    fail "workspace label \`$required_label\` not found — dispatch is fail-closed without it"
+  else
+    msg="HTTP $label_http"
+    [[ -n "$label_err" ]] && msg="$msg — $label_err"
+    fail "Linear label query failed: $msg"
+  fi
+  rm -f "$label_resp_file"
+
+  rm -f "$header_file"
+  trap - EXIT
+fi
+
+# ---------- Section 5: lane state ----------
+section "5. Lane state"
+
+stale_locks=0
+live_locks=0
+total_locks=0
+if [[ -n "${CLAUDE_RUNS_ROOT:-}" && -d "$CLAUDE_RUNS_ROOT" ]]; then
+  shopt -s nullglob
+  for lock_dir in "$CLAUDE_RUNS_ROOT"/.dispatch-batch.lock-*.d; do
+    total_locks=$((total_locks + 1))
+    holder_pid=""
+    # Accept either layout: ".holder" or "pid".
+    if [[ -r "$lock_dir/.holder" ]]; then
+      holder_pid="$(cat "$lock_dir/.holder" 2>/dev/null | tr -d '[:space:]')"
+    elif [[ -r "$lock_dir/pid" ]]; then
+      holder_pid="$(cat "$lock_dir/pid" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    if [[ -n "$holder_pid" ]] && kill -0 "$holder_pid" 2>/dev/null; then
+      live_locks=$((live_locks + 1))
+    else
+      stale_locks=$((stale_locks + 1))
+      warn "stale dispatch lock: $(basename "$lock_dir") (pid ${holder_pid:-unknown} not alive)"
+    fi
+  done
+  shopt -u nullglob
+fi
+
+if [[ $total_locks -eq 0 ]]; then
+  pass "no dispatch locks present"
+elif [[ $stale_locks -eq 0 ]]; then
+  pass "$live_locks dispatch lock(s), all held by live processes"
+fi
+# stale_locks > 0 already emitted WARN line(s) above; no extra PASS.
+
+# ---------- Summary ----------
+section "Summary"
+
+if [[ $FAIL_COUNT -eq 0 ]]; then
+  status="PASS"
+  color="$C_GREEN"
+else
+  status="FAIL"
+  color="$C_RED"
+fi
+
+printf '%sclaude-doctor: %s%s (%d passed, %d failed, %d warned)\n' \
+  "$color" "$status" "$C_RESET" "$PASS_COUNT" "$FAIL_COUNT" "$WARN_COUNT"
+
+if [[ $FAIL_COUNT -gt 0 ]]; then
+  exit 1
+fi
+exit 0

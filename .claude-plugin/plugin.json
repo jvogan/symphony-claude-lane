@@ -1,0 +1,20 @@
+{
+  "name": "symphony-claude-lane",
+  "description": "Smart multi-model dispatch for OpenAI Symphony + Linear workflows. Route tasks to Claude Code or Codex based on what each task requires.",
+  "version": "3.0.0",
+  "author": {
+    "name": "Contributors"
+  },
+  "repository": "https://github.com/jvogan/symphony-claude-lane",
+  "license": "MIT",
+  "keywords": [
+    "symphony",
+    "claude",
+    "openai",
+    "linear",
+    "orchestration",
+    "multi-model",
+    "routing",
+    "agent-skill"
+  ]
+}

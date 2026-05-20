@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "linear": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LINEAR_API_KEY}"
+      }
+    },
+    "runpod": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@runpod/mcp-server@latest"],
+      "env": {
+        "RUNPOD_API_KEY": "${RUNPOD_API_KEY}"
+      }
+    }
+  }
+}

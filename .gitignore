@@ -1,0 +1,21 @@
+.DS_Store
+.env
+.env.*
+node_modules/
+*.log
+.claude/
+
+# Editor / IDE cruft (per-contributor; not project-specific).
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.python-version
+
+# Runtime artifacts produced by the reference launcher.
+# Defaults in env.sh place these inside the repo; they can hold rendered Linear
+# issue bodies, meta.env, screenshots, and local paths. Never commit them.
+workspaces/
+runs/
+logs/

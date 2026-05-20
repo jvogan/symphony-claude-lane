@@ -1,0 +1,96 @@
+# Symphony + Claude Lane
+
+> An installable agent skill that adds Claude Code workers alongside Codex in OpenAI Symphony + Linear workflows. Symphony dispatches Codex workers through its Elixir runtime; this skill adds Claude workers as **interactive sessions in detached tmux panes**, tracked through the same Linear backlog, with smart routing that sends each task to the right agent. As of v3.0.0 the documented backend is tmux (replacing the v2.x `claude -p` model); see docs/migration-v2-to-v3.md for the migration story.
+
+## What this is
+
+A skill you install into an AI coding agent (Codex or Claude Code) that teaches the orchestrator how to run Claude workers alongside Symphony's Codex workers. Once installed, your agent can analyze each issue's characteristics, pick the best model, launch Claude workers securely in isolated git worktrees, create a durable routing profile, and define visual verification, privacy, and closeout rules. Also supports Claude-only setups without Codex. No API plumbing required — both Codex and Claude Code are subscription tools with built-in agent capabilities.
+
+## Who this is for
+
+Developers and operators who run Symphony + Linear with Codex workers and want to add Claude Code for tasks that benefit from visual judgment, deep reasoning, browser verification, external tool access, security review, or documentation quality. Also for teams that want Claude-only workers against Linear issues without Codex.
+
+## How the two runtimes work together
+
+Symphony (Elixir) dispatches Codex workers — managing worktrees, scheduling, and process supervision. Claude workers run as interactive `claude` sessions inside detached tmux panes — launched by the orchestrator or a launcher script, not through Symphony's runtime. Workers signal completion by writing a JSON sentinel file via the bundled `bin/claude-tmux-finalize` helper; the dispatcher polls for the sentinel. Linear is the shared control plane for both: issues, state transitions, routing labels, and closeout all live there regardless of which agent executes the work.
+
+## Key concepts
+
+- **Task-Characteristic Routing**: The orchestrator analyzes each issue and picks the best model based on what the task requires. Labels serve as overrides.
+- **Label-Only Routing**: Alternative strategy where routing is determined entirely by Linear labels. Simpler but less adaptive.
+- **Claude-Only Mode**: For teams without Codex. All tasks route to Claude. The dispatch contract still applies.
+- **Routing Profile**: A repo-local YAML file (`.orchestration/claude-lane.yaml`) that records model selection criteria, label overrides, privacy rules, guardrails, and cleanup policy.
+- **Visual Verification**: Playwright-first browser verification for tickets affecting rendered output.
+- **Fail-Closed Worker Launch**: Claude launchers should require an explicit Claude route, pass only an allowlisted environment, render an explicit closeout state, and keep dry-runs free of worktree/run artifacts.
+- **Closeout Verification**: A worker session that exited cleanly (sentinel `status='completed'`) is not proof that the tracker reached the requested state. Launchers should re-query Linear and surface mismatches as `closeout_verified=false`.
+- **Sentinel JSON Contract**: Workers signal completion by writing a JSON sentinel file (schema in docs/architecture.md). The dispatcher validates the sentinel as a JSON object before extracting fields, mapping malformed sentinels to `exit_reason=sentinel_malformed` instead of silently coercing.
+- **MCP Defense-in-Depth**: The RunPod MCP and its `RUNPOD_API_KEY` env var are jointly opt-in via `CLAUDE_WORKER_ENABLE_RUNPOD=true`. A worker cannot bypass the MCP gate by calling RunPod via raw `curl` because the credentials are also withheld.
+- **Outcome Parser Compatibility**: New workers emit `symphony-outcome`; audit tools may support legacy `symphony:outcome verdict=pass` comments while refusing current failed or blocked outcomes.
+
+## When to prefer Claude
+
+- Requires browser verification or visual judgment
+- Requires deep reasoning (architecture, complex debugging)
+- Requires external tools (MCP servers, APIs, databases)
+- Involves security review, code review, or documentation
+- Involves product copy or technical writing
+- Breaks in Codex sandbox (E2E tests, integration tests)
+
+## When to prefer Codex
+
+- Bounded implementation with clear acceptance criteria
+- Sandbox-compatible (no network, browser, or system access needed)
+- Parallelizable batch of similar tasks
+- Config, schema, type, or migration changes
+- Test infrastructure or mechanical refactors
+
+## Default workflow
+
+Inspect repo -> confirm multi-model candidate -> confirm base workflow has guardrails -> analyze work patterns -> ask adopter about routing preferences -> create or update `.orchestration/claude-lane.yaml` with routing strategy, model selection criteria, privacy rules, and retention policy -> prefer same-project label routing unless stronger separation is needed -> document routing contract -> use Playwright for visual verification -> apply safe closeout and cleanup rules
+
+## Repo structure
+
+- `skills/symphony-claude-lane/SKILL.md` — main skill definition
+- `skills/symphony-claude-lane/agents/openai.yaml` — skill discovery and interface metadata
+- `skills/symphony-claude-lane/references/setup.md` — prerequisites and candidate checks
+- `skills/symphony-claude-lane/references/routing.md` — routing strategies, model selection criteria, adopter questions
+- `skills/symphony-claude-lane/references/dispatch.md` — model selection algorithm, queue split, worker lifecycle
+- `skills/symphony-claude-lane/references/worker-launch.md` — secure Claude worker launch pattern (fetch, worktree, render, launch, finalize, cleanup)
+- `skills/symphony-claude-lane/references/visual-verification.md` — Playwright-first browser verification guidance
+- `skills/symphony-claude-lane/references/closeout.md` — outcome blocks, In Review, retries, self-close rules
+- `skills/symphony-claude-lane/references/troubleshooting.md` — common failure modes
+- `skills/symphony-claude-lane/references/examples.md` — concrete routing examples across task types
+- `skills/symphony-claude-lane/assets/claude-lane-profile.example.yaml` — example routing profile with model selection criteria
+- `skills/symphony-claude-lane/assets/claude-lane-guidance.snippet.md` — starter guidance for adopter repo orchestration docs
+- `skills/symphony-claude-lane/assets/claude-worker.reference.sh` — reference launcher script (adapt to your environment)
+- `skills/symphony-claude-lane/assets/review-audit.reference.py` — reference parser for current and legacy outcome comments
+- `skills/symphony-claude-lane/assets/worker-prompt.template.md` — worker prompt template with trust boundary, capabilities, and closeout protocol
+- `skills/symphony-claude-lane/assets/linear-outcome-block.example.md` — example structured closeout comments
+- `bin/claude-doctor` — preflight battery (env vars, deps, Linear connectivity, dispatch-lock state)
+- `bin/claude-version` — print install root/commit and worker model defaults
+- `bin/claude-tmux-finalize` — worker-invoked helper that writes the completion sentinel JSON
+- `env.sh` — source to set lane defaults (paths, model, routing label, MCP config, env allowlist) with autoset-marker idempotency
+- `mcp/worker-mcp.json` — default MCP config (Linear only)
+- `mcp/worker-mcp-runpod.json` — opt-in MCP config (Linear + RunPod, jointly gated with the RunPod env-var allowlist)
+- `settings/claude-settings.tmux.json` — per-worktree `.claude/settings.json` with bypassPermissions
+- `tests/` — fully-isolated regression tests (sentinel-malformed JSON validation, MCP opt-in branches)
+- `docs/architecture.md` — sentinel JSON contract, dispatch lock TOCTOU mitigation, autoset-marker pattern, MCP defense-in-depth
+- `docs/lessons.md` — bug-by-bug postmortems from the tmux backend build
+- `docs/linear-setup.md` — how to set up `lane:claude` + `model:*` labels in a Linear workspace
+- `docs/migration-v2-to-v3.md` — what changes if you adopted v2.0.1
+
+## Install
+
+```bash
+npx skills add jvogan/symphony-claude-lane
+```
+
+Or copy `skills/symphony-claude-lane/` into your Codex skills directory or reference `SKILL.md` from Claude Code.
+
+## Prerequisites
+
+Requires an existing Symphony + Linear workflow. See [symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter) to set one up.
+
+## License
+
+MIT

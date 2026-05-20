@@ -1,0 +1,150 @@
+# Copy this file into the adopter repo as `.orchestration/claude-lane.yaml`
+# and edit it to match the repo's actual routing policy.
+
+schema_version: 2
+
+# Routing strategy.
+# - task-characteristic: orchestrator analyzes each task and picks the best model.
+#   Labels serve as overrides.
+# - label-only: routing is determined entirely by Linear labels.
+routing_strategy: task-characteristic
+
+# For Claude-only setups (no Codex), set this to true.
+# All tasks route to Claude regardless of characteristics.
+claude_only: false
+
+# Keep the routing inside the same Linear control plane by default.
+# Options:
+# - shared-project-labels
+# - separate-project
+queue_strategy: shared-project-labels
+
+# Launcher-level dispatch guardrails. A Claude worker should not launch for an
+# arbitrary Linear issue unless at least one of these guards matches, or the
+# operator deliberately passes an override such as --allow-unrouted.
+worker_launcher:
+  require_explicit_routing: true
+  required_label: lane:claude
+  # Keep unset by default. Project-regex routing can be useful, but it is broad
+  # enough that adopters should opt in deliberately.
+  allowed_project_regex: null
+  allowed_assignee: null
+  inherit_full_environment: false
+  dry_run_creates_artifacts: false
+  dry_run_validates_rendered_prompt: true
+
+# --- Model selection criteria ---
+# These guide the orchestrator when routing_strategy is task-characteristic.
+
+# Route to Claude when a task has any of these characteristics.
+prefer_claude_when:
+  - requires_browser_verification
+  - requires_visual_judgment
+  - requires_external_tools
+  - requires_deep_reasoning
+  - involves_security_review
+  - involves_documentation
+  - involves_code_review
+  - involves_product_copy
+  - breaks_in_sandbox
+
+# Route to Codex when a task has any of these characteristics.
+prefer_codex_when:
+  - bounded_implementation
+  - sandbox_compatible
+  - parallelizable_batch
+  - config_or_schema_changes
+  - test_infrastructure
+  - mechanical_refactor
+
+# --- Label overrides ---
+# These take priority over task-characteristic analysis.
+
+# Labels that always route to Claude regardless of analysis.
+always_route_to_claude:
+  - lane:claude
+  - kind:ui
+  - kind:ux
+  - kind:design
+  - kind:copy
+  - kind:review
+  - kind:security-review
+  - kind:docs
+
+# Labels that always route to Codex regardless of analysis.
+always_route_to_codex:
+  - lane:codex
+  - kind:infra
+  - kind:ci
+  - kind:types
+  - kind:migration
+
+# Visual verification policy for tickets that affect rendered output.
+visual_verification_required:
+  enabled: true
+  labels:
+    - kind:ui
+    - kind:ux
+    - kind:design
+  paths:
+    - app/
+    - src/
+    - pages/
+    - components/
+
+# Preferred Claude models by work type.
+preferred_models:
+  default: opus
+  lighter_weight:
+    - sonnet
+
+# The routing should inherit the base workflow guardrails rather than
+# treating any model's tasks as exempt from them.
+base_workflow_guardrails:
+  workspace_bootstrap_assertions: true
+  no_progress_stop_loss: true
+  canonical_issue_contract: true
+
+# Keep sensitive data out of queue state, comments, screenshots, and traces.
+privacy_rules:
+  redact_issue_bodies_and_comments: true
+  redact_screenshots_and_traces: true
+  avoid_raw_customer_payloads: true
+  redact_local_paths: true
+  redact_private_queue_or_campaign_names: true
+  secret_scan_before_artifact_share: true
+
+# Default closeout policy.
+closeout_mode:
+  default: in-review
+  worker_success_state: In Review
+  self_close_state: Done
+  on_control_plane_failure: preserve-artifacts
+  verify_closeout_state: true
+  preserve_on_closeout_mismatch: true
+  support_legacy_outcome_parser: true
+  allow_self_close_for:
+    - direct-branch
+    - direct-pr
+
+# Cleanup and retention policy.
+cleanup_policy:
+  owner: operator
+  cadence: after-each-wave
+  retain_in_review_until_integrated: true
+  preserve_on_control_plane_failure: true
+  include_snapshot_repos: true
+  verify_integration_before_cleanup: true
+  integration_check: branch-merged
+  storage_watchlist:
+    - git-worktrees
+    - snapshot-repos
+    - browser-screenshots
+    - traces
+    - build-artifacts
+    - dependency-trees
+  repo_specific_hotspots:
+    - "<fill-in: local caches, generated assets, or large directories unique to this repo>"
+
+# Whether the agent should ask the user before routing an ambiguous ticket.
+ask_on_ambiguous_tickets: true
