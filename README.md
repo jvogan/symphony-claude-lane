@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/jvogan/symphony-claude-lane/actions/workflows/test.yml/badge.svg)](https://github.com/jvogan/symphony-claude-lane/actions/workflows/test.yml)
-[![Agent Skill](https://img.shields.io/badge/Agent_Skill-v3.0.0--rc2-8A2BE2.svg)](#install)
+[![Agent Skill](https://img.shields.io/badge/Agent_Skill-v3.0.0--rc3-8A2BE2.svg)](#install)
 
 ![Symphony + Claude Lane](assets/banner.jpg)
 
@@ -26,7 +26,7 @@ You install the skill, point it at a repo, and your orchestrator agent learns ho
                 (shared issues & state)
 ```
 
-> **Current release candidate: v3.0.0-rc2.** The default backend runs Claude workers as interactive sessions in tmux panes instead of `claude -p` subprocesses. This bills against the operator's Claude subscription, matches the normal interactive session model, and gives operators attachable long-running workers. Teams that prefer API-priced / headless `claude -p` can adapt the launcher intentionally; see [`docs/backend-options.md`](docs/backend-options.md).
+> **Current release candidate: v3.0.0-rc3.** The default backend runs Claude workers as interactive sessions in tmux panes instead of `claude -p` subprocesses. This bills against the operator's Claude subscription, matches the normal interactive session model, and gives operators attachable long-running workers. Teams that prefer API-priced / headless `claude -p` can adapt the launcher intentionally; see [`docs/backend-options.md`](docs/backend-options.md).
 
 ## Why this exists
 
