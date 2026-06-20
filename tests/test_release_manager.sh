@@ -81,6 +81,10 @@ case "${1:-}" in
       list)
         if [[ "$*" == *"--state merged"* ]]; then
           cat "${GH_STUB_LIST_MERGED:?}"
+        elif [[ "$*" == *"--label release:queued"* && "$*" == *"--state open"* ]]; then
+          # Reclaim query: OPEN PRs still carrying the queued label (orphans).
+          # Real gh honors --jq '.[].number'; emit newline-separated numbers.
+          if [[ -n "${GH_STUB_LIST_QUEUED:-}" ]]; then cat "$GH_STUB_LIST_QUEUED"; fi
         else
           cat "${GH_STUB_LIST:?}"
         fi
@@ -90,6 +94,9 @@ case "${1:-}" in
         exit 0
         ;;
       merge)
+        exit 0
+        ;;
+      comment)
         exit 0
         ;;
       view)
@@ -279,12 +286,18 @@ else
   ok "dry-run writes no metrics file"
 fi
 
-banner "Conflict: --on-conflict fail (default) skips DIRTY PR"
+banner "Conflict: --on-conflict fail (default) fails DIRTY PR out of the ready set"
 : > "$GH_STUB_LOG"
 export GH_STUB_LIST="$GH_STUB_LIST_DIRTY"
 out="$("$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test --apply --no-linear --strategy squash --max 1 2>&1)"
 echo "$out" | sed 's/^/    /'
-grep -q "SKIP  #44  merge_state=DIRTY" <<<"$out" && ok "default on-conflict=fail skips DIRTY PR" || bad "default on-conflict did not skip DIRTY PR"
+grep -q "CONFLICT #44  merge_state=DIRTY" <<<"$out" && ok "default on-conflict=fail surfaces DIRTY as CONFLICT" || bad "default on-conflict did not surface DIRTY CONFLICT"
+if grep -q "pr edit 44" "$GH_STUB_LOG" && grep -q -- "--add-label release:failed" "$GH_STUB_LOG" && grep -q -- "--remove-label release:ready" "$GH_STUB_LOG"; then
+  ok "DIRTY PR relabeled release:failed (removed from ready set; no busy-spin)"
+else
+  bad "DIRTY PR not relabeled release:failed"
+fi
+grep -q "pr comment 44" "$GH_STUB_LOG" && ok "DIRTY PR gets an explanatory rebase comment" || bad "DIRTY PR got no comment"
 if grep -q "pr merge 44" "$GH_STUB_LOG"; then
   bad "on-conflict=fail merged a DIRTY PR"
 else
@@ -296,12 +309,17 @@ else
   ok "on-conflict=fail did not add release:rebase label"
 fi
 
-banner "Conflict: --on-conflict redispatch fail-closed without Linear"
+banner "Conflict: --on-conflict redispatch fail-closed without Linear -> fails the PR"
 : > "$GH_STUB_LOG"
 out="$("$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test --apply --no-linear --on-conflict redispatch --strategy squash --max 1 2>&1)"
 echo "$out" | sed 's/^/    /'
-grep -q "SKIP  #44  merge_state=DIRTY" <<<"$out" && ok "redispatch fail-closed: DIRTY PR skipped when --no-linear" || bad "redispatch did not fail-closed to SKIP without Linear"
+grep -q "CONFLICT #44" <<<"$out" && ok "redispatch without Linear surfaces CONFLICT (not a silent skip)" || bad "redispatch did not surface CONFLICT without Linear"
 grep -q "Linear unusable" <<<"$out" && ok "redispatch logs fail-closed reason" || bad "redispatch did not log fail-closed reason"
+if grep -q -- "--add-label release:failed" "$GH_STUB_LOG"; then
+  ok "redispatch-without-Linear fails the PR out of the ready set (no busy-spin)"
+else
+  bad "redispatch-without-Linear did not fail the PR"
+fi
 if grep -q "release:rebase" "$GH_STUB_LOG"; then
   bad "redispatch added release:rebase label without Linear"
 else
@@ -412,7 +430,12 @@ banner "Live lock blocks second release manager"
 key="$(printf '%s|%s|%s' "$REPO" "main" "release:ready" | shasum | cut -c1-12)"
 lock="$CLAUDE_RUNS_ROOT/.release-manager.lock-$key.d"
 mkdir -p "$lock"
-sleep 30 &
+# The holder must look like a real release-manager: acquire_lock guards against
+# PID reuse by inspecting the live PID's command line (see takeover test below),
+# so a bare `sleep` would be treated as a reused PID and the lock taken over.
+holder_script="$TMP/release-manager-lock-holder"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$holder_script"; chmod +x "$holder_script"
+"$holder_script" &
 holder=$!
 register_cleanup "kill $holder 2>/dev/null || true"
 printf '%s\n' "$holder" > "$lock/pid"
@@ -428,6 +451,42 @@ else
 fi
 kill "$holder" 2>/dev/null || true
 wait "$holder" 2>/dev/null || true
+
+banner "Stale lock held by a REUSED (non-release-manager) PID is taken over"
+: > "$GH_STUB_LOG"
+mkdir -p "$lock"
+# Simulate PID reuse: the lock records a live PID that is NOT a release-manager
+# (a plain sleep). acquire_lock must take the lock over instead of blocking.
+sleep 30 &
+reused=$!
+register_cleanup "kill $reused 2>/dev/null || true"
+printf '%s\n' "$reused" > "$lock/pid"
+set +e
+takeover_out="$("$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test --apply --no-linear --strategy squash --max 1 2>&1)"
+takeover_rc=$?
+set -e
+if (( takeover_rc == 0 )) && grep -q "reused by a non-release-manager process" <<<"$takeover_out"; then
+  ok "stale lock with reused non-release-manager PID is taken over"
+else
+  bad "reused-PID lock not taken over (rc=$takeover_rc)"
+  echo "$takeover_out" | sed 's/^/    /'
+fi
+kill "$reused" 2>/dev/null || true
+wait "$reused" 2>/dev/null || true
+
+banner "Orphan reclaim: open release:queued PR is moved back to release:ready"
+: > "$GH_STUB_LOG"
+GH_STUB_LIST_QUEUED="$TMP/pr-list-queued.txt"; printf '46\n' > "$GH_STUB_LIST_QUEUED"; export GH_STUB_LIST_QUEUED
+export GH_STUB_LIST="$TMP/pr-list-empty.json"; printf '[]\n' > "$GH_STUB_LIST"
+out="$("$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test --apply --no-linear --strategy squash --max 1 2>&1)"
+echo "$out" | sed 's/^/    /'
+grep -q "reclaiming orphaned release:queued PR #46" <<<"$out" && ok "orphaned queued PR detected and reclaimed" || bad "orphaned queued PR not reclaimed"
+if grep -q "pr edit 46" "$GH_STUB_LOG" && grep -q -- "--add-label release:ready" "$GH_STUB_LOG" && grep -q -- "--remove-label release:queued" "$GH_STUB_LOG"; then
+  ok "reclaim moves PR #46 release:queued -> release:ready"
+else
+  bad "reclaim label transition wrong"
+fi
+unset GH_STUB_LIST_QUEUED
 
 banner "Summary"
 echo "  PASS=$PASS FAIL=$FAIL"

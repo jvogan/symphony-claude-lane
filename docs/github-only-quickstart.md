@@ -29,17 +29,23 @@ chaos failure. If you later want the latency fix too, see "Scaling up" below.
 ## One-time GitHub setup
 
 ```bash
-# 1. Authenticate gh (workers and the release manager use it).
-gh auth login        # then: gh auth status
+# 1. Authenticate gh AND wire git's credential helper. Workers push over HTTPS;
+#    a GH_TOKEN alone does NOT let `git push` authenticate — setup-git fixes that.
+gh auth login          # then: gh auth status
+gh auth setup-git      # so each worker's `git push` authenticates
 
 # 2. Create the handoff labels (the entire state machine in this mode).
-for L in release:ready release:queued release:merged release:failed release:rebase; do
-  gh label create "$L" -R OWNER/REPO 2>/dev/null || true
+export GH_REPO=owner/name           # <-- set to YOUR repo, e.g. octocat/widgets
+for L in release:ready release:queued release:merged release:failed; do
+  gh label create "$L" -R "$GH_REPO" 2>/dev/null || true
 done
 
-# 3. Clone this skill and source its env, then run the GitHub-only preflight.
-source /path/to/symphony-claude-lane/env.sh
-bin/release-manager-doctor --repo /path/to/your/repo
+# 3. Clone THIS skill, then source its env and run the GitHub-only preflight.
+#    (The release-manager tooling lives at the repo ROOT — `npx skills add`
+#    installs only the skill folder, NOT bin/ or env.sh, so git clone is required.)
+git clone https://github.com/jvogan/symphony-claude-lane.git
+source symphony-claude-lane/env.sh
+bin/release-manager-doctor --repo /path/to/your/repo --strategy squash
 ```
 
 `release-manager-doctor` (not `claude-doctor` — that one expects Linear) is your
@@ -86,8 +92,10 @@ git worktree add ../wt-fix-nav -b claude/fix-nav main
 ```
 
 **b) Use the bundled launcher in GitHub-only mode.** The reference launcher runs
-a tmux-backed Claude worker that takes its task from a GitHub issue or a file
-(no Linear) and closes out by opening a PR + adding `release:ready`:
+a tmux-backed **Claude** worker that takes its task from a GitHub issue or a file
+(no Linear) and closes out by opening a PR + adding `release:ready`. (It is
+**Claude-only** — there is no Codex launcher in this repo; run Codex workers via
+option (a), or via Symphony for managed fleets.)
 
 ```bash
 # Task from a GitHub issue (its lane:claude label, if set, is honored as the routing guard):
@@ -127,6 +135,10 @@ bin/release-manager --repo /path/to/your/repo --no-linear --strategy squash \
   `--strategy queue` only once you've enabled auto-merge or a merge queue.
 - **Do not add `--wait-merge`** for high volume — it re-serializes the very work
   a merge queue would batch. Leave it off and let the loop drain.
+- **No CI on the repo?** Every PR is skipped (`checks=none`) and the loop merges
+  *nothing*. Add `--allow-no-checks` to merge on the label alone — only on repos
+  where every label-adder is trusted. (`release-manager-doctor` warns when it
+  finds no PR-triggered CI.)
 
 > **`--loop` is a foreground heartbeat, not a daemon.** It is a plain
 > poll-and-sleep inside one process: if that process dies, merging silently
@@ -136,7 +148,8 @@ bin/release-manager --repo /path/to/your/repo --no-linear --strategy squash \
 > GitHub Action template at
 > [`docs/examples/release-on-ready.yml`](examples/release-on-ready.yml), which
 > merges ready + CI-green PRs automatically and serially with no machine to
-> keep running.
+> keep running. Run **one** driver — a local `--loop` *or* the Action, not both
+> (they don't share a lock across machines).
 
 Monitor anytime (read-only, never takes the lock):
 
