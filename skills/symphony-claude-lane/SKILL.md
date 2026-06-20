@@ -65,6 +65,7 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Read `references/worker-launch.md` when helping the adopter set up the Claude worker launcher, MCP config, or security practices.
 - Read `../../docs/backend-options.md` when the adopter asks about tmux versus `claude -p`, API pricing, or a hybrid backend.
 - Read `../../docs/release-manager-lane.md` when the adopter asks about autonomous deploys, high-volume PR merging, "deploy" commands, merge queues, or avoiding parallel workers fighting over `main`.
+- Read `../../docs/goal-layer.md` when the adopter wants autonomous progress toward a long-horizon **goal** (not just a fixed backlog) — a durable goal in a Linear project + ephemeral planner passes that mint each next wave of work and stop on acceptance/budget. It sits ABOVE the release lane; the `/goal` command bootstraps it and `bin/goal-manager` owns the durable state + termination guards.
 - Read `../../docs/github-only-quickstart.md` when the adopter has only Claude Code/Codex + GitHub and no Linear/Symphony — the worker→release-manager flow runs in `--no-linear` mode with PR + `release:*` labels as the control plane.
 - Read `references/visual-verification.md` before writing browser-verification policy.
 - Read `references/closeout.md` when defining `In Review`, outcome blocks, retry behavior, or self-close rules.

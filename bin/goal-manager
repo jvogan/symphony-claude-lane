@@ -1,0 +1,1026 @@
+#!/usr/bin/env bash
+# goal-manager — durable goal layer above the release lane.
+#
+# The release-manager lane EXECUTES and merges a backlog. It does not decide
+# what the next wave of work should be. goal-manager is that missing piece: it
+# holds a durable GOAL (north-star + acceptance criteria + budget) in a Linear
+# project and drives ephemeral "planner" passes that mint the next wave of work
+# tickets — or stop when the acceptance criteria are met.
+#
+# Design (mirrors the release lane one level up):
+#   * Durable STATE lives in Linear (a project description block); the agents
+#     are EPHEMERAL and re-derive everything each pass. No long-lived "brain".
+#   * The planner is dispatched like a worker (a Linear ticket labelled
+#     goal:planner), but its OUTPUT is new tickets, not a PR. This script does
+#     not launch the planner agent; it mints the planner TICKET and the existing
+#     dispatcher (Symphony, the worker launcher, or an operator) runs it.
+#   * All guard logic (dedup, budget, bounded recursion) lives HERE, server-state
+#     derived and fail-closed — never in the agent's head.
+#
+# Dry-run is the default. Mutations require --apply. Read-only `status` always
+# works (the planner agent calls it every pass).
+set -euo pipefail
+
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+
+GRAPHQL_URL="https://api.linear.app/graphql"
+
+# State block markers in the project description. The machine state is a single
+# base64-encoded JSON blob between these markers, so arbitrary north-star /
+# acceptance text (newlines, markdown, quotes) can never corrupt the block or be
+# parsed as instructions.
+STATE_OPEN='<!-- goal-state -->'
+STATE_CLOSE='<!-- /goal-state -->'
+STATE_VERSION=1
+
+mode="dry-run"
+subcommand=""
+goal_id=""
+team_key="${GOAL_MANAGER_TEAM_KEY:-}"
+goal_name=""
+north_star=""
+acceptance=""
+tasks_file=""
+planner_ticket=""
+reason=""
+repo_path=""
+with_release_manager=false
+loop=false
+no_tasks=false
+
+planner_label="${GOAL_MANAGER_PLANNER_LABEL:-goal:planner}"
+planned_label="${GOAL_MANAGER_PLANNED_LABEL:-goal:planned}"
+nowork_label="${GOAL_MANAGER_NOWORK_LABEL:-goal:nowork}"
+task_label="${GOAL_MANAGER_TASK_LABEL:-lane:claude}"
+budget_tasks="${GOAL_MANAGER_BUDGET_TASKS:-20}"
+budget_passes="${GOAL_MANAGER_BUDGET_PASSES:-10}"
+no_new_work_halt="${GOAL_MANAGER_NO_NEW_WORK_HALT:-2}"
+backlog_min="${GOAL_MANAGER_BACKLOG_MIN:-0}"
+max_per_wave="${GOAL_MANAGER_MAX_PER_WAVE:-5}"
+interval="${GOAL_MANAGER_POLL_SECONDS:-60}"
+done_state_override="${GOAL_MANAGER_DONE_STATE:-}"
+
+planner_stale_ticks="${GOAL_MANAGER_PLANNER_STALE_TICKS:-10}"
+
+locks_root="${CLAUDE_RUNS_ROOT:-$SYMPHONY_CLAUDE_ROOT/runs}"
+LOCKS_ACQUIRED=()
+GOAL_LOCK_HELD=false
+# Path of the in-flight Linear auth-header temp file, so the EXIT trap can shred it
+# if a signal lands mid-request (otherwise the API key would persist in $TMPDIR).
+LINEAR_HEADER_TMP=""
+# Set true by set_status when it flips a goal out of "active", so the tick loop can
+# stop without an extra (race-prone) re-read.
+GOAL_TERMINAL_SET=false
+# Consecutive ticks observing a planner pending dispatch (in-process staleness signal).
+PENDING_TICKS=0
+
+# Cache of the last project snapshot (one GraphQL round-trip reused within a verb).
+SNAPSHOT_JSON=""
+
+usage() {
+  cat >&2 <<EOF
+Usage: $(basename "$0") <command> [options]
+
+Durable goal layer above the release lane. Dry-run is the default; mutations
+require --apply. State lives in a Linear project; the planner is dispatched as a
+goal:planner ticket whose output is the next wave of work tickets.
+
+Commands:
+  init        Create the goal project + first planner ticket (+ optional wave-1).
+  status      Print derived goal state as JSON (read-only; no --apply needed).
+  add-tasks   Create the next wave of work tickets from a JSON file, deduped and
+              budgeted. With --planner-ticket, records the pass and closes it.
+  next-planner Mint the next planner ticket, OR halt/complete if a guard trips
+              (budget spent, no-new-work streak, goal not active).
+  complete    Mark the goal done (acceptance met). Closes --planner-ticket if given.
+  halt        Mark the goal halted (operator stop / guard). Closes --planner-ticket.
+  tick        One heartbeat pass: optionally run the release manager, then mint a
+              planner when the backlog is low. --loop repeats every --interval.
+
+Common options:
+  --apply                 Perform Linear/GitHub mutations (default: dry-run).
+  --goal PROJECT_ID       Linear project id of the goal (required except for init).
+
+init options:
+  --team KEY              Linear team key (default: \$GOAL_MANAGER_TEAM_KEY).
+  --name NAME             Goal / project name (required).
+  --north-star TEXT       One-paragraph north star (required).
+  --acceptance TEXT       Acceptance criteria; the planner stops when these hold.
+  --budget-tasks N        Hard cap on total work tickets (default: $budget_tasks).
+  --budget-passes N       Hard cap on planner passes (default: $budget_passes).
+  --no-new-work-halt N    Halt after N consecutive planner passes that add nothing
+                          (default: $no_new_work_halt).
+  --task-label LABEL      Label applied to work tickets so the lane picks them up
+                          (default: $task_label).
+  --tasks-file FILE       Optional wave-1 tasks (JSON; see add-tasks).
+
+add-tasks options:
+  --tasks-file FILE       JSON array of {title, description?} or {"tasks":[...]}.
+  --no-tasks              Record a zero-work pass (no file). Increments the
+                          no-new-work streak. Use when there is nothing to add.
+  --planner-ticket ID     The planner ticket (TEAM-N) to record the pass on + close.
+  --max-per-wave N        Cap creations this call (default: $max_per_wave).
+
+tick options:
+  --with-release-manager  Run 'release-manager --repo PATH --apply' first.
+  --repo PATH             Repo for --with-release-manager.
+  --backlog-min N         Mint a planner when unstarted work tickets <= N
+                          (default: $backlog_min).
+  --interval N            Loop sleep seconds (default: $interval).
+  --loop                  Repeat tick forever.
+
+complete/halt options:
+  --reason TEXT           Recorded in the goal state + comment.
+  --planner-ticket ID     Planner ticket to close.
+
+Environment: see env.sh (GOAL_MANAGER_*). Requires LINEAR_API_KEY for any Linear
+read or write.
+EOF
+}
+
+die() { echo "goal-manager: error: $*" >&2; exit 2; }
+log() { echo "[goal-manager] $*"; }
+
+release_locks() {
+  local L
+  for L in "${LOCKS_ACQUIRED[@]:-}"; do
+    [[ -n "$L" ]] && rm -rf "$L" 2>/dev/null || true
+  done
+  # Shred any auth-header temp file left behind if a signal interrupted a request
+  # before linear_graphql could remove it (keeps the API key off disk).
+  [[ -n "$LINEAR_HEADER_TMP" ]] && rm -f "$LINEAR_HEADER_TMP" 2>/dev/null || true
+  return 0
+}
+# Same signal discipline as release-manager: clean up on ANY exit, and translate
+# INT/TERM into a normal exit so a --loop tick cannot catch the signal, clean up,
+# and then RESUME with the lock dir gone (which would let a second heartbeat
+# double-mint planners). See release-manager for the full rationale.
+trap release_locks EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+safe_meta_value() {
+  local name="$1" value="$2"
+  [[ "$value" != *$'\n'* ]] || die "$name contains newline"
+  [[ "$value" != *"'"* ]] || die "$name contains single quote"
+}
+
+b64enc() { openssl base64 -A; }
+b64dec() { openssl base64 -d -A; }
+
+# Normalize a title for dedup: lowercase, collapse internal whitespace, trim.
+norm_title() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//'
+}
+
+linear_graphql() {
+  # Identical fail-closed contract to release-manager: a Linear response carrying
+  # top-level `errors` or missing `data` is a FAILURE (HTTP is 200 either way),
+  # so every caller can fail closed instead of reading an error body as an empty
+  # result. Default the variables to an explicit empty object (NOT ${2:-{}},
+  # which bash mis-parses).
+  local q="$1" v="${2:-}"
+  [[ -n "$v" ]] || v='{}'
+  [[ -n "${LINEAR_API_KEY:-}" ]] || return 1
+  local header payload body rc
+  header="$(mktemp)"
+  LINEAR_HEADER_TMP="$header"   # tracked so the EXIT trap shreds it if a signal interrupts curl
+  payload="$(jq -nc --arg q "$q" --argjson v "$v" '{query:$q,variables:$v}')"
+  printf 'Authorization: %s' "$LINEAR_API_KEY" > "$header"
+  set +e
+  body="$(curl -sf "$GRAPHQL_URL" -H @"$header" -H "Content-Type: application/json" --data "$payload")"
+  rc=$?
+  set -e
+  rm -f "$header"; LINEAR_HEADER_TMP=""
+  (( rc == 0 )) || return "$rc"
+  jq -e '.data != null and (has("errors") | not)' >/dev/null 2>&1 <<<"$body" || return 1
+  printf '%s' "$body"
+}
+
+require_linear() {
+  [[ -n "${LINEAR_API_KEY:-}" ]] || die "LINEAR_API_KEY is required for Linear access"
+}
+
+linear_team_id() {
+  local tk="$1"
+  linear_graphql \
+    'query($tk:String!){teams(filter:{key:{eq:$tk}},first:1){nodes{id}}}' \
+    "$(jq -nc --arg tk "$tk" '{tk:$tk}')" |
+    jq -r '.data.teams.nodes[0].id // empty'
+}
+
+# Resolve a label id by exact name (workspace scope). Empty if not found.
+linear_label_id() {
+  local name="$1"
+  linear_graphql \
+    'query($n:String!){issueLabels(filter:{name:{eq:$n}},first:1){nodes{id name}}}' \
+    "$(jq -nc --arg n "$name" '{n:$n}')" |
+    jq -r '.data.issueLabels.nodes[0].id // empty'
+}
+
+# Look up a label by name; create it (team-scoped) if absent. Echoes the id, or
+# returns non-zero on failure so callers fail closed.
+linear_ensure_label() {
+  local name="$1" team_id="$2" id
+  id="$(linear_label_id "$name" 2>/dev/null || true)"
+  if [[ -n "$id" ]]; then printf '%s' "$id"; return 0; fi
+  [[ "$mode" == "apply" ]] || { printf '%s' ""; return 0; }
+  id="$(linear_graphql \
+    'mutation($n:String!,$t:String!){issueLabelCreate(input:{name:$n,teamId:$t}){issueLabel{id}}}' \
+    "$(jq -nc --arg n "$name" --arg t "$team_id" '{n:$n,t:$t}')" |
+    jq -r '.data.issueLabelCreate.issueLabel.id // empty')"
+  [[ -n "$id" ]] || return 1
+  printf '%s' "$id"
+}
+
+# A state id of type "completed" for the team (used to close planner tickets).
+# Prefer an explicit --done-state name when given; else the first completed-type
+# state. Robust across workspaces because it keys on the fixed state TYPE, not
+# the workspace-specific NAME.
+linear_completed_state_id() {
+  local team_id="$1" states
+  states="$(linear_graphql \
+    'query($id:String!){team(id:$id){states{nodes{id name type}}}}' \
+    "$(jq -nc --arg id "$team_id" '{id:$id}')")" || return 1
+  if [[ -n "$done_state_override" ]]; then
+    jq -r --arg n "$done_state_override" '.data.team.states.nodes[] | select(.name==$n) | .id' <<<"$states" | head -1
+    return 0
+  fi
+  jq -r '[.data.team.states.nodes[] | select(.type=="completed")][0].id // empty' <<<"$states"
+}
+
+linear_create_issue() {
+  local team_id="$1" project_id="$2" title="$3" body="$4" label_ids_json="$5"
+  linear_graphql \
+    'mutation($t:String!,$p:String!,$ti:String!,$d:String,$l:[String!]){issueCreate(input:{teamId:$t,projectId:$p,title:$ti,description:$d,labelIds:$l}){issue{id identifier url}}}' \
+    "$(jq -nc --arg t "$team_id" --arg p "$project_id" --arg ti "$title" --arg d "$body" --argjson l "$label_ids_json" \
+       '{t:$t,p:$p,ti:$ti,d:$d,l:$l}')" |
+    jq -r '.data.issueCreate.issue | "\(.identifier)\t\(.id)\t\(.url)"'
+}
+
+linear_comment() {
+  local issue_uuid="$1" body="$2"
+  linear_graphql \
+    'mutation($issueId:String!,$body:String!){commentCreate(input:{issueId:$issueId,body:$body}){success}}' \
+    "$(jq -nc --arg issueId "$issue_uuid" --arg body "$body" '{issueId:$issueId,body:$body}')" >/dev/null
+}
+
+# Move an issue to a state and SET its label set (full replace) in one update.
+linear_close_issue() {
+  local issue_uuid="$1" state_id="$2" label_ids_json="$3"
+  [[ -n "$state_id" ]] || return 1
+  linear_graphql \
+    'mutation($id:String!,$s:String!,$l:[String!]){issueUpdate(id:$id,input:{stateId:$s,labelIds:$l}){success}}' \
+    "$(jq -nc --arg id "$issue_uuid" --arg s "$state_id" --argjson l "$label_ids_json" '{id:$id,s:$s,l:$l}')" >/dev/null
+}
+
+# Resolve a TEAM-N identifier to its uuid from the CURRENT snapshot. This is a
+# direct project→issues relation and is immediately consistent, unlike the
+# workspace issues(filter:{number}) search index (linear_issue_uuid), which lags a
+# freshly-created ticket by seconds — the same index lag the release lane documents
+# for `gh pr list --label`. A planner ticket being recorded is by definition in its
+# goal's project, so the snapshot always has it. Empty if absent.
+snapshot_issue_uuid() {
+  local ident="$1"
+  jq -r --arg i "$ident" '.data.project.issues.nodes[]? | select(.identifier==$i) | .id' <<<"$SNAPSHOT_JSON" | head -1
+}
+
+# Resolve a TEAM-N identifier to its issue uuid via the workspace index (fallback
+# for issues not in the current snapshot). May lag just-created tickets.
+linear_issue_uuid() {
+  local ident="$1" tk num
+  tk="${ident%%-*}"
+  num="${ident##*-}"
+  [[ "$num" =~ ^[0-9]+$ ]] || return 1
+  linear_graphql \
+    'query($tk:String!,$n:Float!){issues(filter:{team:{key:{eq:$tk}},number:{eq:$n}},first:1){nodes{id}}}' \
+    "$(jq -nc --arg tk "$tk" --argjson n "$num" '{tk:$tk,n:$num}')" 2>/dev/null |
+    jq -r '.data.issues.nodes[0].id // empty'
+}
+
+# ---------- Project snapshot + state ----------
+
+# Project metadata + ALL issues (paginated). Cached in SNAPSHOT_JSON. Fail-closed:
+# returns non-zero if Linear is unreadable. Pagination matters because every guard
+# (budget, dedup, pass count) is DERIVED from this set — a truncated window would
+# silently under-count and let creation run past the budget. If a goal somehow
+# exceeds the hard page cap we refuse the snapshot rather than trust partial counts.
+project_snapshot() {
+  local id="$1" page base nodes='[]' has after='' i=0
+  local maxpages="${GOAL_MANAGER_MAX_SNAPSHOT_PAGES:-50}"   # 50 * 100 = 5000 issues
+  while :; do
+    if [[ -z "$after" ]]; then
+      # The durable state block lives in the project's long-form `content` (the
+      # `description` field is capped at 255 chars by Linear and cannot hold it).
+      page="$(linear_graphql \
+        'query($id:String!){project(id:$id){id name content issues(first:100){nodes{id identifier title createdAt state{name type} labels{nodes{name}}} pageInfo{hasNextPage endCursor}}}}' \
+        "$(jq -nc --arg id "$id" '{id:$id}')")" || return 1
+    else
+      page="$(linear_graphql \
+        'query($id:String!,$after:String!){project(id:$id){issues(first:100,after:$after){nodes{id identifier title createdAt state{name type} labels{nodes{name}}} pageInfo{hasNextPage endCursor}}}}' \
+        "$(jq -nc --arg id "$id" --arg after "$after" '{id:$id,after:$after}')")" || return 1
+    fi
+    jq -e '.data.project != null' >/dev/null 2>&1 <<<"$page" || return 1
+    [[ -z "${base:-}" ]] && base="$page"   # first page carries the project metadata
+    nodes="$(jq -c --argjson acc "$nodes" '$acc + (.data.project.issues.nodes // [])' <<<"$page")"
+    has="$(jq -r '.data.project.issues.pageInfo.hasNextPage // false' <<<"$page")"
+    after="$(jq -r '.data.project.issues.pageInfo.endCursor // ""' <<<"$page")"
+    i=$((i + 1))
+    [[ "$has" == "true" && -n "$after" ]] || break
+    if (( i >= maxpages )); then
+      log "goal $id exceeds the snapshot cap (${maxpages}*100 issues); refusing — counts/budgets would be unreliable. Split into smaller goals."
+      return 1
+    fi
+  done
+  # Rebuild the snapshot with the FULL node list under .data.project.issues.nodes.
+  SNAPSHOT_JSON="$(jq -c --argjson nodes "$nodes" '.data.project.issues = {nodes:$nodes}' <<<"$base")"
+  return 0
+}
+
+# Decode the goal-state JSON blob from the cached snapshot's description. Returns
+# non-zero (and emits nothing) if the block is missing/corrupt. Fails CLOSED if more
+# than one opening marker is present: a forged second block (smuggled via the human
+# north-star/name text, or pasted into the project description by hand) must never be
+# silently parsed as the source of truth.
+goalstate_read() {
+  local desc b64 json opens
+  desc="$(jq -r '.data.project.content // ""' <<<"$SNAPSHOT_JSON")"
+  opens="$(grep -cF -- "$STATE_OPEN" <<<"$desc" || true)"
+  if [[ "$opens" != "1" ]]; then
+    [[ "$opens" == "0" ]] || log "goal-state read refused: $opens goal-state blocks in the description (expected 1) — possible tampering"
+    return 1
+  fi
+  b64="$(awk -v o="$STATE_OPEN" -v c="$STATE_CLOSE" '
+    $0==o {grab=1; next} $0==c {grab=0} grab && NF {print; exit}' <<<"$desc")"
+  [[ -n "$b64" ]] || return 1
+  json="$(printf '%s' "$b64" | b64dec 2>/dev/null)" || return 1
+  jq -e . >/dev/null 2>&1 <<<"$json" || return 1
+  printf '%s' "$json"
+}
+
+# Read an integer field from a goal-state JSON, failing CLOSED if it is not a bare
+# non-negative integer. Guards the bash arithmetic sinks ((...)) against a forged
+# state block: an unvalidated value like 'x[$(cmd)]' would otherwise execute, since
+# bash evaluates command substitution inside arithmetic array subscripts.
+gs_int() {
+  local field="$1" json="$2" val
+  val="$(jq -r --arg f "$field" '.[$f] // empty' <<<"$json")"
+  [[ "$val" =~ ^[0-9]+$ ]] || die "corrupt goal-state: '$field' is not a non-negative integer (got: ${val:-empty})"
+  printf '%s' "$val"
+}
+
+# Rewrite the project description = human header + fresh state block. The state
+# JSON is passed on stdin. Preserves nothing of the old machine block (it is
+# regenerated wholesale from the new JSON).
+# Neutralize any HTML-comment marker in human text so a north-star/name value can
+# never forge a second goal-state block in the rendered header (defense in depth on
+# top of goalstate_read's single-block check + init-time validation).
+strip_markers() { printf '%s' "$1" | tr '\n' ' ' | sed -e 's/<!--/<!- -/g' -e 's/-->/-- >/g'; }
+
+goalstate_write() {
+  local id="$1" json header b64 content nm ns status summary
+  json="$(cat)"
+  nm="$(strip_markers "$(jq -r '.name // "goal"' <<<"$json")")"
+  ns="$(strip_markers "$(jq -r '.north_star // ""' <<<"$json")")"
+  status="$(strip_markers "$(jq -r '.status // "active"' <<<"$json")")"
+  b64="$(printf '%s' "$json" | b64enc)"
+  header="$(printf '# Goal: %s\n\n**Status:** %s\n\n**North star:** %s\n\n_Managed by goal-manager. The machine-readable block below is the source of truth; do not edit it by hand._\n' \
+    "$nm" "$status" "$ns")"
+  # The full human header + machine block goes in `content` (long-form). The
+  # `description` field is capped at 255 chars by Linear, so it gets only a short
+  # summary for the project-list UI — it is never parsed for state.
+  content="$(printf '%s\n\n%s\n%s\n%s\n' "$header" "$STATE_OPEN" "$b64" "$STATE_CLOSE")"
+  summary="$(printf 'goal-manager goal [%s]: %s' "$status" "$nm")"
+  summary="${summary:0:240}"
+  linear_graphql \
+    'mutation($id:String!,$d:String!,$c:String!){projectUpdate(id:$id,input:{description:$d,content:$c}){success}}' \
+    "$(jq -nc --arg id "$id" --arg d "$summary" --arg c "$content" '{id:$id,d:$d,c:$c}')" >/dev/null
+}
+
+# Derive counts + guard signals from the cached snapshot. Emits a JSON object.
+# Keys on state TYPE (completed/canceled/started/unstarted/backlog) so it works
+# regardless of a workspace's custom state names.
+derive_counts() {
+  # Every binding is parenthesized so jq's `as` precedence across the `|` chain is
+  # unambiguous. Streak = leading run of no-work flags in the most-recent-first
+  # list of completed planner passes.
+  jq -c \
+    --arg planner "$planner_label" \
+    --arg nowork "$nowork_label" '
+    def has_label($n): any(.labels.nodes[]?; .name == $n);
+    def is_open: (.state.type=="unstarted" or .state.type=="backlog");
+    def is_started: (.state.type=="started");
+    # "duplicate" is a closed Linear state type — treat it as terminal so an issue
+    # in it is never miscounted as still-open work or a still-pending planner.
+    def is_terminal: (.state.type=="completed" or .state.type=="canceled" or .state.type=="duplicate");
+    .data.project.issues.nodes as $all
+    | ([ $all[] | select(has_label($planner) | not) ]) as $work
+    | ([ $all[] | select(has_label($planner)) ]) as $planners
+    | ([ $planners[] | select(is_terminal) ] | sort_by(.createdAt) | reverse) as $donep
+    # A planner is PENDING if it is not terminal — whatever its state type — so a
+    # ticket in a custom/triage state can never be invisible and let a second planner
+    # be minted alongside it (the "never two planners at once" invariant).
+    | ([ $planners[] | select(is_terminal | not) ] | sort_by(.createdAt) | reverse) as $pending
+    | ([ $donep[] | has_label($nowork) ]) as $flags
+    | {
+        total_tasks: ($work | length),
+        open_tasks:  ([ $work[] | select(is_open) ] | length),
+        inprog_tasks:([ $work[] | select(is_started) ] | length),
+        done_tasks:  ([ $work[] | select(.state.type=="completed") ] | length),
+        canceled_tasks:([ $work[] | select(.state.type=="canceled") ] | length),
+        planner_passes: ($donep | length),
+        pending_planners: ($pending | length),
+        pending_planner_ids: [ $pending[] | .identifier ],
+        newest_pending_planner: ( $pending[0].identifier // null ),
+        nowork_streak: ( ($flags | index(false)) as $i | if $i == null then ($flags|length) else $i end )
+      }
+  ' <<<"$SNAPSHOT_JSON"
+}
+
+acquire_lock() {
+  [[ "$mode" == "apply" ]] || return 0
+  "$GOAL_LOCK_HELD" && return 0
+  mkdir -p "$locks_root" 2>/dev/null || true
+  local lock_dir holder key
+  key="$(printf 'goal|%s' "$goal_id" | shasum | cut -c1-12)"
+  lock_dir="$locks_root/.goal-manager.lock-$key.d"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    holder=""
+    [[ -r "$lock_dir/pid" ]] && holder="$(cat "$lock_dir/pid" 2>/dev/null || echo)"
+    if [[ -z "$holder" ]]; then
+      for _ in 1 2 3 4 5; do
+        sleep 0.1
+        [[ -r "$lock_dir/pid" ]] && holder="$(cat "$lock_dir/pid" 2>/dev/null || echo)"
+        [[ -n "$holder" ]] && break
+      done
+    fi
+    if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+      if ps -p "$holder" -o command= 2>/dev/null | grep -q 'goal-manager'; then
+        die "another goal-manager is running for goal=$goal_id (pid $holder)"
+      fi
+      log "stale goal lock at $lock_dir (pid $holder reused by a non-goal-manager process) — taking over"
+    else
+      log "stale goal lock at $lock_dir (pid ${holder:-unknown} no such process after retry) — taking over"
+    fi
+    rm -rf "$lock_dir" 2>/dev/null
+    mkdir "$lock_dir" 2>/dev/null || die "could not acquire goal lock"
+  fi
+  printf '%s\n' "$$" > "$lock_dir/pid"
+  printf 'goal=%s\n' "$goal_id" > "$lock_dir/scope"
+  LOCKS_ACQUIRED+=("$lock_dir")
+  GOAL_LOCK_HELD=true
+}
+
+# The planner ticket description carries an explicit ROLE + machine block so any
+# dispatcher (Symphony, the launcher, an operator) knows this is a planning pass
+# and which goal it serves. The agent prompt template fills in the behavior.
+planner_ticket_body() {
+  local pass="$1"
+  cat <<EOF
+ROLE: goal planner (NOT an implementer). Your output is the next wave of Linear
+work tickets for this goal, or completion — never code or a PR.
+
+<!-- goal-planner-ticket -->
+goal_id: $goal_id
+team_key: $team_key
+pass: $pass
+managed_by: goal-manager
+<!-- /goal-planner-ticket -->
+
+## How to run this planning pass
+
+1. Read durable state:  goal-manager status --goal $goal_id
+2. Judge the acceptance criteria against the DONE work tickets, strictly and
+   from evidence. Do not assume completion.
+3. If acceptance is MET:
+     goal-manager complete --goal $goal_id --reason "<evidence>" --planner-ticket {{THIS_TICKET}} --apply
+4. If NOT met, produce ONLY the next small, concrete wave (bounded tickets, each
+   with acceptance criteria + validation), then:
+     goal-manager add-tasks --goal $goal_id --tasks-file wave.json --planner-ticket {{THIS_TICKET}} --apply
+     goal-manager next-planner --goal $goal_id --apply
+5. If there is genuinely nothing to add yet but the goal is not done, record a
+   no-work pass instead of inventing busywork:
+     goal-manager add-tasks --goal $goal_id --no-tasks --planner-ticket {{THIS_TICKET}} --apply
+     goal-manager next-planner --goal $goal_id --apply
+
+Re-anchor every wave to the north star. Do NOT expand scope beyond it. The tool
+dedups against existing tickets and enforces the budget; stay well within it.
+EOF
+}
+
+# ---------- Commands ----------
+
+cmd_init() {
+  require_linear
+  [[ -n "$team_key" ]] || die "init requires --team KEY (or GOAL_MANAGER_TEAM_KEY)"
+  [[ -n "$goal_name" ]] || die "init requires --name"
+  [[ -n "$north_star" ]] || die "init requires --north-star"
+  safe_meta_value "--team" "$team_key"
+  # Reject goal-state markers in human fields so they cannot forge a second state
+  # block once rendered into the project description (defense in depth alongside
+  # strip_markers + goalstate_read's single-block check).
+  local _f
+  for _f in "$goal_name" "$north_star" "$acceptance"; do
+    case "$_f" in
+      *"$STATE_OPEN"*|*"$STATE_CLOSE"*) die "goal text may not contain goal-state markers ('$STATE_OPEN')" ;;
+    esac
+  done
+
+  local team_id
+  team_id="$(linear_team_id "$team_key")" || die "could not resolve team $team_key"
+  [[ -n "$team_id" ]] || die "team not found: $team_key"
+
+  local state_json
+  state_json="$(jq -nc \
+    --argjson v "$STATE_VERSION" \
+    --arg name "$goal_name" \
+    --arg ns "$north_star" \
+    --arg acc "$acceptance" \
+    --arg tk "$team_key" \
+    --argjson bt "$budget_tasks" \
+    --argjson bp "$budget_passes" \
+    --argjson nh "$no_new_work_halt" \
+    --arg tl "$task_label" \
+    '{v:$v,status:"active",name:$name,north_star:$ns,acceptance:$acc,team_key:$tk,budget_tasks:$bt,budget_passes:$bp,no_new_work_halt:$nh,task_label:$tl,planners_minted:0}')"
+
+  if [[ "$mode" != "apply" ]]; then
+    log "DRY RUN init: would create project '$goal_name' in team $team_key + first planner ticket"
+    [[ -n "$tasks_file" ]] && log "DRY RUN init: would seed wave-1 from $tasks_file"
+    printf '%s\n' "$state_json" | jq .
+    return 0
+  fi
+
+  # Ensure the labels the state machine relies on exist before we create anything.
+  # planned/nowork are only needed to EXIST now (their ids are re-resolved when a
+  # pass closes a planner ticket); planner/task ids are used below.
+  local planner_id task_id
+  planner_id="$(linear_ensure_label "$planner_label" "$team_id")" || die "could not ensure label $planner_label"
+  linear_ensure_label "$planned_label" "$team_id" >/dev/null || die "could not ensure label $planned_label"
+  linear_ensure_label "$nowork_label" "$team_id" >/dev/null || die "could not ensure label $nowork_label"
+  task_id="$(linear_ensure_label "$task_label" "$team_id")" || die "could not ensure label $task_label"
+
+  local proj
+  proj="$(linear_graphql \
+    'mutation($n:String!,$t:[String!]!){projectCreate(input:{name:$n,teamIds:$t}){project{id url}}}' \
+    "$(jq -nc --arg n "$goal_name" --argjson t "[\"$team_id\"]" '{n:$n,t:$t}')" |
+    jq -r '.data.projectCreate.project | "\(.id)\t\(.url)"')"
+  goal_id="$(cut -f1 <<<"$proj")"
+  local proj_url; proj_url="$(cut -f2 <<<"$proj")"
+  [[ -n "$goal_id" ]] || die "project creation failed"
+  log "created goal project $goal_id ($proj_url)"
+
+  # Persist the durable state block.
+  project_snapshot "$goal_id" || die "could not read back new project"
+  printf '%s' "$state_json" | goalstate_write "$goal_id" || die "could not write goal state"
+
+  # Optional wave-1 work tickets.
+  if [[ -n "$tasks_file" ]]; then
+    project_snapshot "$goal_id"
+    create_wave "$team_id" "[\"$task_id\"]" "$tasks_file" "wave-1"
+  fi
+
+  # First planner ticket (reserves planners_minted=1 in the state block).
+  mint_planner "$team_id" "$planner_id" "$task_id" "$state_json"
+  log "init complete: goal=$goal_id"
+  echo "$goal_id"
+}
+
+# Create work tickets from a JSON file with dedup + budget + per-wave cap.
+# Args: team_id, label_ids_json, file, context-label. Echoes created count via
+# the global CREATED_COUNT. Requires a fresh project_snapshot for dedup/budget.
+CREATED_COUNT=0
+create_wave() {
+  local team_id="$1" label_ids_json="$2" file="$3" ctx="$4"
+  CREATED_COUNT=0
+  [[ -r "$file" ]] || die "tasks file not readable: $file"
+  local tasks
+  tasks="$(jq -c 'if type=="array" then . else .tasks end' "$file" 2>/dev/null)" || die "invalid tasks JSON in $file"
+  [[ "$(jq -r 'type' <<<"$tasks")" == "array" ]] || die "tasks must be an array or {\"tasks\":[...]}"
+
+  # Existing work-ticket titles (normalized) for dedup, and current total for budget.
+  # Bash 3.2 has no associative arrays, so the seen-set is a newline-delimited
+  # string of normalized titles checked with a whole-line fixed-string grep.
+  local counts total existing seen_titles="" t
+  counts="$(derive_counts)"
+  total="$(jq -r '.total_tasks' <<<"$counts")"
+  existing="$(jq -r --arg planner "$planner_label" '
+    def has_label($n): any(.labels.nodes[]?; .name == $n);
+    [ .data.project.issues.nodes[] | select(has_label($planner)|not) | .title ] | .[]' <<<"$SNAPSHOT_JSON")"
+  while IFS= read -r t; do [[ -n "$t" ]] && seen_titles+="$(norm_title "$t")"$'\n'; done <<<"$existing"
+
+  local n created=0 skipped_dupe=0 skipped_budget=0 title body key created_ident
+  n="$(jq 'length' <<<"$tasks")"
+  local i
+  for (( i=0; i<n; i++ )); do
+    title="$(jq -r ".[$i].title // empty" <<<"$tasks")"
+    body="$(jq -r ".[$i].description // \"\"" <<<"$tasks")"
+    [[ -n "$title" ]] || { log "$ctx: skipping task #$i with no title"; continue; }
+    key="$(norm_title "$title")"
+    if grep -qxF -- "$key" <<<"$seen_titles"; then
+      log "$ctx: dedup skip (already present): $title"
+      skipped_dupe=$((skipped_dupe+1))
+      continue
+    fi
+    if (( total + created >= budget_tasks )); then
+      log "$ctx: budget reached ($budget_tasks tasks); skipping: $title"
+      skipped_budget=$((skipped_budget+1))
+      continue
+    fi
+    if (( created >= max_per_wave )); then
+      log "$ctx: per-wave cap ($max_per_wave) reached; deferring: $title"
+      skipped_budget=$((skipped_budget+1))
+      continue
+    fi
+    if [[ "$mode" != "apply" ]]; then
+      log "$ctx: DRY RUN would create: $title"
+    else
+      created_ident="$(linear_create_issue "$team_id" "$goal_id" "$title" "$body" "$label_ids_json" | cut -f1)"
+      [[ -n "$created_ident" ]] || { log "$ctx: create FAILED for: $title"; continue; }
+      log "$ctx: created $created_ident  $title"
+    fi
+    seen_titles+="$key"$'\n'
+    created=$((created+1))
+  done
+  log "$ctx: created=$created dedup_skipped=$skipped_dupe budget_skipped=$skipped_budget"
+  CREATED_COUNT=$created
+}
+
+# Mint a planner ticket, RESERVING the slot in durable state first. The durable
+# planners_minted counter (in the project description, read-your-writes consistent)
+# is the lag-proof anti-double-mint guard: after a mint, planners_minted exceeds the
+# number of completed passes, so the next pass — heartbeat or agent — sees a slot
+# outstanding and will not mint a second planner even if Linear's issue LIST has not
+# yet surfaced the new ticket (the index lags; the description does not). Reserve
+# BEFORE create so a create failure fails closed (a stalled slot) rather than open
+# (a double mint). Args: team_id planner_id task_id gs_json.
+mint_planner() {
+  local team_id="$1" planner_id="$2" task_id="$3" gs="$4" body labels pass minted reserved
+  minted="$(gs_int planners_minted "$gs")"
+  pass="$((minted + 1))"
+  body="$(planner_ticket_body "$pass")"
+  labels="[\"$planner_id\",\"$task_id\"]"
+  if [[ "$mode" != "apply" ]]; then
+    log "DRY RUN would mint planner ticket (pass $pass)"
+    return 0
+  fi
+  # Reserve the slot durably first.
+  reserved="$(jq -c --argjson m "$pass" '.planners_minted=$m' <<<"$gs")"
+  printf '%s' "$reserved" | goalstate_write "$goal_id" || { log "could not reserve planner slot (state write failed); not minting"; return 1; }
+  local ident
+  ident="$(linear_create_issue "$team_id" "$goal_id" "[planner] goal pass $pass: decide next wave" "$body" "$labels" | cut -f1)"
+  if [[ -z "$ident" ]]; then
+    # Roll the reservation back so the slot is not stuck outstanding forever.
+    printf '%s' "$gs" | goalstate_write "$goal_id" || log "planner create failed AND reservation rollback failed; a planner slot is reserved with no ticket (will wait — inspect goal $goal_id)"
+    log "planner ticket creation FAILED"
+    return 1
+  fi
+  log "minted planner ticket $ident (pass $pass) — awaiting dispatch (goal:planner)"
+}
+
+cmd_status() {
+  require_linear
+  [[ -n "$goal_id" ]] || die "status requires --goal PROJECT_ID"
+  project_snapshot "$goal_id" || die "could not read goal project $goal_id"
+  local gs counts terminal
+  gs="$(goalstate_read)" || die "goal project $goal_id has no readable goal-state block"
+  counts="$(derive_counts)"
+  # Terminal = explicit status, or a guard that next-planner would act on.
+  terminal="$(jq -nc \
+    --argjson gs "$gs" --argjson c "$counts" '
+    ($gs.status != "active") as $stopped
+    | ($c.planner_passes >= $gs.budget_passes) as $passes_spent
+    | ($c.nowork_streak >= $gs.no_new_work_halt) as $stalled
+    | ($stopped or $passes_spent or $stalled)')"
+  jq -nc \
+    --arg goal "$goal_id" \
+    --argjson gs "$gs" \
+    --argjson c "$counts" \
+    --argjson terminal "$terminal" '
+    {goal_id:$goal, status:$gs.status, name:$gs.name,
+     north_star:$gs.north_star, acceptance:$gs.acceptance,
+     budget_tasks:$gs.budget_tasks, budget_passes:$gs.budget_passes,
+     no_new_work_halt:$gs.no_new_work_halt,
+     counts:$c,
+     budget_tasks_remaining:( [$gs.budget_tasks - $c.total_tasks, 0] | max ),
+     budget_passes_remaining:( [$gs.budget_passes - $c.planner_passes, 0] | max ),
+     terminal:$terminal}' | jq .
+}
+
+cmd_add_tasks() {
+  require_linear
+  [[ -n "$goal_id" ]] || die "add-tasks requires --goal PROJECT_ID"
+  if ! "$no_tasks"; then
+    [[ -n "$tasks_file" ]] || die "add-tasks requires --tasks-file FILE (or --no-tasks)"
+  fi
+  acquire_lock
+  project_snapshot "$goal_id" || die "could not read goal project $goal_id"
+  local gs status team_id
+  gs="$(goalstate_read)" || die "goal project $goal_id has no readable goal-state block"
+  status="$(jq -r '.status' <<<"$gs")"
+  team_key="$(jq -r '.team_key' <<<"$gs")"
+  task_label="$(jq -r '.task_label' <<<"$gs")"
+  # The budget is durable goal state, not a CLI default — read it from the block
+  # (validated as an integer: it feeds bash arithmetic, so a forged value must not
+  # reach ((...)) unchecked).
+  budget_tasks="$(gs_int budget_tasks "$gs")"
+  if [[ "$status" != "active" ]]; then
+    log "goal $goal_id is not active (status=$status); not adding tasks"
+    return 0
+  fi
+  team_id="$(linear_team_id "$team_key")" || die "could not resolve team $team_key"
+
+  CREATED_COUNT=0
+  if "$no_tasks"; then
+    log "no-work pass: recording zero tasks for this planner pass"
+  else
+    local task_id; task_id="$(linear_ensure_label "$task_label" "$team_id")" || die "could not ensure task label"
+    [[ -n "$task_id" ]] || die "task label $task_label unresolved"
+    create_wave "$team_id" "[\"$task_id\"]" "$tasks_file" "wave"
+  fi
+
+  # Record the pass on the planner ticket and close it (planned vs nowork).
+  if [[ -n "$planner_ticket" ]]; then
+    record_pass_and_close "$team_id" "$CREATED_COUNT"
+  fi
+}
+
+# Close the planner ticket, tagging it planned (created>0) or nowork (created==0),
+# and post a one-line pass marker comment. This is what makes planner_passes and
+# nowork_streak derivable from server state next pass.
+record_pass_and_close() {
+  local team_id="$1" created="$2"
+  [[ "$mode" == "apply" ]] || { log "DRY RUN would record pass (created=$created) on $planner_ticket and close it"; return 0; }
+  local uuid planner_id outcome_id state_id labels outcome
+  # Prefer the snapshot (immediately consistent) over the lagging workspace index.
+  uuid="$(snapshot_issue_uuid "$planner_ticket")"
+  [[ -n "$uuid" ]] || uuid="$(linear_issue_uuid "$planner_ticket" 2>/dev/null || true)"
+  [[ -n "$uuid" ]] || { log "could not resolve planner ticket $planner_ticket (not in project snapshot or index); pass not recorded"; return 0; }
+  if (( created > 0 )); then outcome="$planned_label"; else outcome="$nowork_label"; fi
+  planner_id="$(linear_ensure_label "$planner_label" "$team_id" 2>/dev/null || true)"
+  outcome_id="$(linear_ensure_label "$outcome" "$team_id" 2>/dev/null || true)"
+  state_id="$(linear_completed_state_id "$team_id" 2>/dev/null || true)"
+  # The pass-marker comment is the durable, human-auditable record of this pass.
+  linear_comment "$uuid" "<!-- goal-planner-pass -->
+created: $created
+managed_by: goal-manager" || log "pass marker comment failed for $planner_ticket"
+  # Close FAIL-CLOSED: only move the planner to a terminal state if we can apply BOTH
+  # the planner label (so it still counts as a planner pass) AND the outcome label
+  # (planned/nowork). Closing without the outcome label would make derive_counts read
+  # the streak from an unlabelled terminal planner and RESET the no-new-work streak —
+  # defeating the halt. If we cannot, leave the ticket open so the pass is retried.
+  if [[ -z "$state_id" ]]; then
+    log "no completed-type state found; left $planner_ticket open (pass recorded via comment, not closed)"
+    return 0
+  fi
+  if [[ -z "$planner_id" || -z "$outcome_id" ]]; then
+    log "could not resolve planner/$outcome labels; left $planner_ticket open so the pass is retried (streak integrity)"
+    return 0
+  fi
+  labels="$(jq -nc --arg a "$planner_id" --arg b "$outcome_id" '[ $a, $b ]')"
+  if linear_close_issue "$uuid" "$state_id" "$labels"; then
+    log "recorded pass (created=$created) and closed $planner_ticket [$outcome]"
+  else
+    log "could not close planner ticket $planner_ticket (will retry next pass)"
+  fi
+}
+
+cmd_next_planner() {
+  require_linear
+  [[ -n "$goal_id" ]] || die "next-planner requires --goal PROJECT_ID"
+  acquire_lock
+  project_snapshot "$goal_id" || die "could not read goal project $goal_id"
+  local gs status counts team_id
+  gs="$(goalstate_read)" || die "goal project $goal_id has no readable goal-state block"
+  status="$(jq -r '.status' <<<"$gs")"
+  team_key="$(jq -r '.team_key' <<<"$gs")"
+  task_label="$(jq -r '.task_label' <<<"$gs")"
+  budget_passes="$(gs_int budget_passes "$gs")"
+  no_new_work_halt="$(gs_int no_new_work_halt "$gs")"
+  local minted; minted="$(gs_int planners_minted "$gs")"
+  counts="$(derive_counts)"
+
+  if [[ "$status" != "active" ]]; then
+    log "goal $goal_id not active (status=$status); no planner minted"
+    return 0
+  fi
+
+  local passes streak outstanding
+  passes="$(jq -r '.planner_passes' <<<"$counts")"
+  streak="$(jq -r '.nowork_streak' <<<"$counts")"
+
+  # Bounded recursion: halt after N consecutive no-new-work passes.
+  if (( streak >= no_new_work_halt )); then
+    log "no-new-work streak ($streak) reached halt threshold ($no_new_work_halt); halting goal"
+    reason="no_new_work streak=$streak"
+    set_status "halted" "$gs"
+    return 0
+  fi
+  # Budget: halt after the planner-pass cap.
+  if (( passes >= budget_passes )); then
+    log "planner-pass budget spent ($passes/$budget_passes); halting goal"
+    reason="planner_budget passes=$passes"
+    set_status "halted" "$gs"
+    return 0
+  fi
+  # Never run two planners at once. Use the DURABLE reserved-minus-completed count
+  # (lag-proof) rather than the issue-list-derived pending count, which lags Linear's
+  # index after a just-created planner and could otherwise admit a double mint.
+  outstanding=$(( minted - passes ))
+  if (( outstanding > 0 )); then
+    log "a planner slot is outstanding (minted=$minted, completed passes=$passes); not minting another"
+    return 0
+  fi
+
+  team_id="$(linear_team_id "$team_key")" || die "could not resolve team $team_key"
+  local planner_id task_id
+  planner_id="$(linear_ensure_label "$planner_label" "$team_id")" || die "could not ensure planner label"
+  task_id="$(linear_ensure_label "$task_label" "$team_id")" || die "could not ensure task label"
+  mint_planner "$team_id" "$planner_id" "$task_id" "$gs"
+}
+
+# Flip the durable status, merging into the caller's ALREADY-VALIDATED goal-state
+# JSON. It must NOT re-read and must NOT fabricate a skeleton: an earlier version
+# re-snapshotted and fell back to '{}' on a transient read error, then WROTE that
+# skeleton — wiping budgets/team_key/north_star. Callers always hold a good `gs`, so
+# require it. Args: new_status gs_json.
+set_status() {
+  local new="$1" gs="$2"
+  [[ "$(jq -e 'type=="object" and has("team_key")' <<<"$gs" 2>/dev/null)" == "true" ]] \
+    || die "set_status refused: caller passed an invalid goal-state (won't overwrite durable state)"
+  [[ "$new" == "active" ]] || GOAL_TERMINAL_SET=true
+  if [[ "$mode" != "apply" ]]; then
+    log "DRY RUN would set goal $goal_id status=$new (reason: ${reason:-none})"
+    return 0
+  fi
+  printf '%s' "$gs" | jq -c --arg s "$new" --arg r "${reason:-}" '.status=$s | .last_reason=$r' | goalstate_write "$goal_id" \
+    || log "could not persist status=$new"
+  log "goal $goal_id status -> $new (${reason:-no reason})"
+}
+
+cmd_complete() { terminal_cmd "done"; }
+cmd_halt()     { terminal_cmd "halted"; }
+
+terminal_cmd() {
+  local new="$1"
+  require_linear
+  [[ -n "$goal_id" ]] || die "$subcommand requires --goal PROJECT_ID"
+  acquire_lock
+  project_snapshot "$goal_id" || die "could not read goal project $goal_id"
+  local gs team_id
+  gs="$(goalstate_read)" || die "goal project $goal_id has no readable goal-state block"
+  team_key="$(jq -r '.team_key' <<<"$gs")"
+  set_status "$new" "$gs"
+  if [[ -n "$planner_ticket" ]]; then
+    team_id="$(linear_team_id "$team_key" 2>/dev/null || true)"
+    if [[ -n "$team_id" ]]; then record_pass_and_close "$team_id" 0; fi
+  fi
+}
+
+cmd_tick() {
+  require_linear
+  [[ -n "$goal_id" ]] || die "tick requires --goal PROJECT_ID"
+  acquire_lock
+
+  if "$with_release_manager"; then
+    [[ -n "$repo_path" ]] || die "--with-release-manager requires --repo PATH"
+    local rm_bin; rm_bin="$(dirname "${BASH_SOURCE[0]}")/release-manager"
+    if [[ -x "$rm_bin" ]]; then
+      local rm_mode="--dry-run"; [[ "$mode" == "apply" ]] && rm_mode="--apply"
+      log "running release-manager ($rm_mode) for $repo_path"
+      "$rm_bin" --repo "$repo_path" "$rm_mode" || log "release-manager pass returned non-zero (continuing)"
+    else
+      log "release-manager not found at $rm_bin; skipping merge step"
+    fi
+  fi
+
+  project_snapshot "$goal_id" || { log "could not read goal $goal_id this pass; will retry"; return 0; }
+  local gs status counts terminal open pending
+  gs="$(goalstate_read)" || { log "goal $goal_id has no readable state block; skipping"; return 0; }
+  status="$(jq -r '.status' <<<"$gs")"
+  counts="$(derive_counts)"
+
+  if [[ "$status" != "active" ]]; then
+    log "goal $goal_id is $status; nothing to do"
+    TICK_TERMINAL=true
+    return 0
+  fi
+
+  open="$(jq -r '.open_tasks' <<<"$counts")"
+  pending="$(jq -r '.pending_planners' <<<"$counts")"
+  log "goal=$goal_id status=active open_tasks=$open inprog=$(jq -r '.inprog_tasks' <<<"$counts") pending_planners=$pending passes=$(jq -r '.planner_passes' <<<"$counts") nowork_streak=$(jq -r '.nowork_streak' <<<"$counts")"
+
+  if (( pending > 0 )); then
+    PENDING_TICKS=$((PENDING_TICKS + 1))
+    log "planner $(jq -r '.pending_planner_ids|join(",")' <<<"$counts") pending dispatch; waiting (tick $PENDING_TICKS)"
+    # A planner that is minted but never dispatched (or whose agent crashed mid-pass)
+    # parks the goal safely but indefinitely. Surface it loudly after a while so an
+    # operator can check that dispatch is actually running, rather than only emitting
+    # an INFO line forever.
+    if (( PENDING_TICKS >= planner_stale_ticks )); then
+      log "WARNING: a planner has been pending for $PENDING_TICKS ticks (~$((PENDING_TICKS * interval))s) with no progress — is dispatch running for goal:planner tickets? goal=$goal_id"
+    fi
+    return 0
+  fi
+  PENDING_TICKS=0
+  if (( open <= backlog_min )); then
+    log "backlog low (open=$open <= $backlog_min) and no planner pending — minting next planner"
+    cmd_next_planner
+    # next-planner sets GOAL_TERMINAL_SET (via set_status) if a guard halted the goal.
+    # Read that in-process flag rather than re-querying Linear (no extra round-trip,
+    # no fail-open-on-transient-read).
+    if "$GOAL_TERMINAL_SET"; then TICK_TERMINAL=true; fi
+  else
+    log "backlog sufficient (open=$open > $backlog_min); no planner needed this pass"
+  fi
+}
+
+# ---------- Arg parsing ----------
+
+[[ $# -gt 0 ]] || { usage; exit 2; }
+subcommand="$1"; shift
+case "$subcommand" in
+  init|status|add-tasks|next-planner|complete|halt|tick) ;;
+  -h|--help) usage; exit 0 ;;
+  *) die "unknown command: $subcommand (try --help)" ;;
+esac
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply) mode="apply"; shift ;;
+    --dry-run) mode="dry-run"; shift ;;
+    --goal) goal_id="${2:?--goal requires a project id}"; shift 2 ;;
+    --team) team_key="${2:?--team requires a key}"; shift 2 ;;
+    --name) goal_name="${2:?--name requires a value}"; shift 2 ;;
+    --north-star) north_star="${2:?--north-star requires text}"; shift 2 ;;
+    --acceptance) acceptance="${2:?--acceptance requires text}"; shift 2 ;;
+    --budget-tasks) budget_tasks="${2:?--budget-tasks requires N}"; shift 2 ;;
+    --budget-passes) budget_passes="${2:?--budget-passes requires N}"; shift 2 ;;
+    --no-new-work-halt) no_new_work_halt="${2:?--no-new-work-halt requires N}"; shift 2 ;;
+    --task-label) task_label="${2:?--task-label requires a label}"; shift 2 ;;
+    --tasks-file) tasks_file="${2:?--tasks-file requires a path}"; shift 2 ;;
+    --no-tasks) no_tasks=true; shift ;;
+    --planner-ticket) planner_ticket="${2:?--planner-ticket requires TEAM-N}"; shift 2 ;;
+    --max-per-wave) max_per_wave="${2:?--max-per-wave requires N}"; shift 2 ;;
+    --reason) reason="${2:?--reason requires text}"; shift 2 ;;
+    --repo) repo_path="${2:?--repo requires a path}"; shift 2 ;;
+    --with-release-manager) with_release_manager=true; shift ;;
+    --backlog-min) backlog_min="${2:?--backlog-min requires N}"; shift 2 ;;
+    --interval) interval="${2:?--interval requires seconds}"; shift 2 ;;
+    --loop) loop=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || die "jq is required"
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v openssl >/dev/null 2>&1 || die "openssl is required (base64 codec)"
+command -v shasum >/dev/null 2>&1 || die "shasum is required"
+
+for v in "$budget_tasks" "$budget_passes" "$no_new_work_halt" "$max_per_wave" "$interval" "$backlog_min" "$planner_stale_ticks"; do
+  [[ "$v" =~ ^[0-9]+$ ]] || die "numeric options must be non-negative integers (got: $v)"
+done
+[[ "$interval" -gt 0 ]] || die "--interval must be > 0"
+for v in "$planner_label" "$planned_label" "$nowork_label" "$task_label"; do
+  safe_meta_value "label" "$v"
+done
+[[ -z "$planner_ticket" ]] || [[ "$planner_ticket" =~ ^[A-Za-z][A-Za-z0-9]*-[0-9]+$ ]] || die "--planner-ticket must look like TEAM-123"
+
+TICK_TERMINAL=false
+
+run_once() {
+  case "$subcommand" in
+    init)          cmd_init ;;
+    status)        cmd_status ;;
+    add-tasks)     cmd_add_tasks ;;
+    next-planner)  cmd_next_planner ;;
+    complete)      cmd_complete ;;
+    halt)          cmd_halt ;;
+    tick)          cmd_tick ;;
+  esac
+}
+
+if [[ "$subcommand" == "tick" ]] && "$loop"; then
+  if [[ "$mode" == "dry-run" ]]; then
+    log "DRY RUN loop: pass --apply to mint planners / run the release manager"
+  fi
+  while true; do
+    pass_rc=0
+    cmd_tick || pass_rc=$?
+    if "$TICK_TERMINAL"; then
+      log "goal reached a terminal state; stopping loop"
+      break
+    fi
+    if (( pass_rc != 0 )); then
+      log "tick exited rc=$pass_rc; continuing loop after ${interval}s"
+    fi
+    log "sleeping ${interval}s"
+    # Background sleep + wait so a trapped SIGINT/SIGTERM is honored immediately
+    # rather than deferred up to --interval (see release-manager for the rationale).
+    sleep "$interval" &
+    wait "$!" 2>/dev/null || true
+  done
+else
+  run_once
+fi

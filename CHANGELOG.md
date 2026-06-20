@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Goal layer (autonomous long-horizon goals)
+
+- Added a **goal layer** above the release lane so an agent can pursue a durable goal — a north star, acceptance criteria, and a budget — across many waves of work, unattended. See `docs/goal-layer.md`.
+- `bin/goal-manager`: holds durable goal state in a Linear project and owns all termination guards (dedup, task/pass budgets, no-new-work halt). Subcommands: `init`, `status`, `add-tasks`, `next-planner`, `complete`, `halt`, and a `tick`/`--loop` heartbeat that merges via the release lane and mints the next planner when the backlog runs low. Dry-run by default; mutations require `--apply`.
+- `/goal` command (`commands/goal.md`) bootstraps a goal and wires the loop; `skills/.../assets/goal-planner-prompt.template.md` is the planner agent prompt (its output is the next wave of tickets, never a PR).
+- Planner passes are dispatched as `goal:planner` Linear tickets; the planner is ephemeral and re-derives the plan from durable state each pass — mirroring the release lane's stateless, idempotent design one level up.
+- Added `tests/test_goal_manager.sh` (isolated, fake Linear) and `GOAL_MANAGER_*` env defaults.
+
+### Goal-layer hardening
+
+- Fail closed against a forged goal-state block: validate every state-block integer before it reaches shell arithmetic (blocks an arithmetic-injection RCE), refuse a description carrying more than one state block, and neutralize comment markers in human goal text.
+- Paginate the project issue set so the budget/dedup/pass counts are exact at any size (a truncated window previously could silently let creation run past the budget); refuse past a hard issue cap.
+- Lag-proof single-planner guarantee: reserve the mint slot in durable state before creating the ticket, so the heartbeat and a planner agent cannot double-mint during Linear's list-propagation lag.
+- Require the outcome label when closing a planner ticket so a transient label error cannot reset the no-new-work halt; count any non-terminal planner (incl. custom state types) as pending; never overwrite durable state on a transient read; shred the Linear auth-header temp file on signal.
+
 ## v3.0.0-rc3
 
 - Added GitHub-only mode (`--no-linear`): the release manager and worker launcher operate on GitHub labels alone, with no Linear dependency.
