@@ -232,17 +232,52 @@ else
   bad "dry-run created $dry_locks lock dir(s)"
 fi
 
-banner "Apply with stub"
+banner "Apply with stub (squash strategy = synchronous merge)"
 : > "$GH_STUB_LOG"
 out="$("$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test --apply --no-linear --strategy squash --max 1 2>&1)"
 echo "$out" | sed 's/^/    /'
 grep -q "pr edit 42" "$GH_STUB_LOG" && ok "apply transitions labels via gh pr edit" || bad "apply did not edit PR labels"
 grep -q "pr merge 42" "$GH_STUB_LOG" && grep -q -- "--squash" "$GH_STUB_LOG" && ok "apply calls gh pr merge --squash" || bad "apply merge command shape wrong"
-if grep -q "release:merged" "$GH_STUB_LOG"; then
-  bad "no-wait apply promoted PR to release:merged without merge evidence"
+# squash/merge/rebase merge SYNCHRONOUSLY: a 0 exit from `gh pr merge` IS the
+# merge, so a successful immediate-strategy merge reaches terminal release:merged
+# without --wait-merge (and Linear, when enabled, moves the issue to Done).
+if grep -q -- "--add-label release:merged" "$GH_STUB_LOG" && grep -q -- "--remove-label release:queued" "$GH_STUB_LOG"; then
+  ok "squash apply promotes synchronous merge to release:merged"
 else
-  ok "no-wait apply leaves PR queued until merge evidence exists"
+  bad "squash apply did not reach terminal release:merged"
 fi
+
+banner "Apply with queue strategy stays queued without --wait-merge"
+: > "$GH_STUB_LOG"
+out="$("$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test --apply --no-linear --strategy queue --max 1 2>&1)"
+echo "$out" | sed 's/^/    /'
+grep -q "pr merge 42" "$GH_STUB_LOG" && grep -q -- "--auto" "$GH_STUB_LOG" && ok "queue strategy uses gh pr merge --auto" || bad "queue merge command shape wrong"
+# queue/auto only SCHEDULE the merge (auto-merge lands later when checks pass), so
+# without --wait-merge the PR must stay release:queued — promoting would falsely
+# claim the deferred merge already happened.
+if grep -q -- "--add-label release:merged" "$GH_STUB_LOG"; then
+  bad "queue apply promoted to release:merged without confirming the deferred merge"
+else
+  ok "queue apply leaves PR queued until the deferred merge is confirmed"
+fi
+
+banner "CI gate: draft and failing-checks PRs are skipped, never merged"
+# The trust boundary is label + green CI + not-draft. A release:ready PR that is
+# a draft, or whose checks are FAILING, must be skipped (not merged) — the gate
+# that keeps main safe even if an untrusted actor adds the label.
+GATE_LIST="$TMP/pr-list-gate.json"
+cat > "$GATE_LIST" <<'JSON'
+[
+  {"number":51,"title":"DEMO-51 draft pr","url":"https://github.com/example/release-manager-test/pull/51","headRefName":"agent/demo-51","baseRefName":"main","isDraft":true,"mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","labels":[{"name":"release:ready"}],"statusCheckRollup":[{"conclusion":"SUCCESS"}]},
+  {"number":52,"title":"DEMO-52 failing checks","url":"https://github.com/example/release-manager-test/pull/52","headRefName":"agent/demo-52","baseRefName":"main","isDraft":false,"mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","labels":[{"name":"release:ready"}],"statusCheckRollup":[{"conclusion":"FAILURE"}]}
+]
+JSON
+: > "$GH_STUB_LOG"
+out="$(GH_STUB_LIST="$GATE_LIST" "$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test --apply --no-linear --strategy squash --max 5 2>&1)"
+echo "$out" | sed 's/^/    /'
+grep -q "SKIP  #51  draft" <<<"$out" && ok "draft PR is skipped" || bad "draft PR not skipped"
+grep -q "SKIP  #52  checks=fail" <<<"$out" && ok "failing-checks PR is skipped" || bad "failing-checks PR not skipped"
+if grep -q "pr merge" "$GH_STUB_LOG"; then bad "gate let a draft/failing PR reach gh pr merge"; else ok "no merge attempted for draft/failing PRs"; fi
 
 banner "Apply with merge + deploy wait"
 : > "$GH_STUB_LOG"
@@ -487,6 +522,64 @@ else
   bad "reclaim label transition wrong"
 fi
 unset GH_STUB_LIST_QUEUED
+
+banner "Loop exits on SIGTERM and releases the lock (signal must not resume)"
+: > "$GH_STUB_LOG"
+rm -rf "$CLAUDE_RUNS_ROOT"/.release-manager.lock-*.d 2>/dev/null || true
+# Empty candidate + queued lists: the loop just polls (holding its lock), so we
+# can signal it deterministically. A short interval keeps passes quick.
+"$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test \
+  --apply --no-linear --strategy squash --loop --interval 1 >/dev/null 2>&1 &
+sigterm_pid=$!
+for _ in $(seq 1 30); do
+  ls -d "$CLAUDE_RUNS_ROOT"/.release-manager.lock-*.d >/dev/null 2>&1 && break || true
+  sleep 0.1
+done
+if ls -d "$CLAUDE_RUNS_ROOT"/.release-manager.lock-*.d >/dev/null 2>&1; then
+  ok "loop acquired its lock"
+else
+  bad "loop never acquired a lock"
+fi
+kill -TERM "$sigterm_pid" 2>/dev/null || true
+sigterm_gone=0
+for _ in $(seq 1 40); do
+  kill -0 "$sigterm_pid" 2>/dev/null || { sigterm_gone=1; break; }
+  sleep 0.1
+done
+if [[ "$sigterm_gone" == "1" ]]; then
+  ok "loop process exits on SIGTERM (trap converts signal to exit, not resume)"
+else
+  bad "loop process SURVIVED SIGTERM (trap cleaned up but resumed the loop)"
+  kill -9 "$sigterm_pid" 2>/dev/null || true
+fi
+wait "$sigterm_pid" 2>/dev/null || true
+if ls -d "$CLAUDE_RUNS_ROOT"/.release-manager.lock-*.d >/dev/null 2>&1; then
+  bad "lock not released after SIGTERM"
+  rm -rf "$CLAUDE_RUNS_ROOT"/.release-manager.lock-*.d 2>/dev/null || true
+else
+  ok "lock released after SIGTERM exit"
+fi
+
+banner "GraphQL queries reference every declared variable (Linear rejects unused vars)"
+# The fake curl returns canned data without validating queries, so a query that
+# DECLARES a variable it never uses passes the stub but FAILS against real Linear
+# ('Variable "$x" is never used.'), silently breaking that operation. Lint the
+# real query strings: every $var in a query/mutation signature must appear in the
+# body. (Caught the linear_state_id $name regression that broke issue closeout.)
+gql_unused=""
+while IFS= read -r q; do
+  sig="${q#*(}"; sig="${sig%%)*}"   # signature: e.g. $tk:String!,$name:String!
+  body="${q#*)}"                    # query body after the signature
+  for v in $(grep -oE '\$[A-Za-z_][A-Za-z0-9_]*' <<<"$sig" | sort -u); do
+    used="$(awk -v v="$v" 'BEGIN{n=0}{s=$0;L=length(v);while((p=index(s,v))>0){a=substr(s,p+L,1);if(a!~/[A-Za-z0-9_]/)n++;s=substr(s,p+L)}}END{print n}' <<<"$body")"
+    [[ "$used" -gt 0 ]] || gql_unused="$gql_unused ${v}"
+  done
+done < <(grep -oE "'(query|mutation)\(\\\$[^']*'" "$ROOT/bin/release-manager" | sed "s/^'//; s/'\$//")
+if [[ -z "$gql_unused" ]]; then
+  ok "every GraphQL query uses all declared variables"
+else
+  bad "GraphQL query declares unused variable(s):$gql_unused"
+fi
 
 banner "Summary"
 echo "  PASS=$PASS FAIL=$FAIL"
