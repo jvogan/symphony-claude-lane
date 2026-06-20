@@ -128,11 +128,29 @@ bin/release-manager --repo /path/to/your/repo --no-linear --strategy squash \
 - **Do not add `--wait-merge`** for high volume — it re-serializes the very work
   a merge queue would batch. Leave it off and let the loop drain.
 
+> **`--loop` is a foreground heartbeat, not a daemon.** It is a plain
+> poll-and-sleep inside one process: if that process dies, merging silently
+> stops and nothing restarts it. Use it for attended sessions. For durable,
+> hands-off operation, either run the **one-shot** form (drop `--loop`) on a
+> schedule — cron, `launchd`, or a systemd timer — or adopt the event-driven
+> GitHub Action template at
+> [`docs/examples/release-on-ready.yml`](examples/release-on-ready.yml), which
+> merges ready + CI-green PRs automatically and serially with no machine to
+> keep running.
+
 Monitor anytime (read-only, never takes the lock):
 
 ```bash
 bin/release-status --repo /path/to/your/repo
 ```
+
+**The trust boundary: label + green CI.** The release manager merges a PR only
+when it *both* carries `release:ready` **and** has green CI — a red, pending, or
+check-less PR is skipped, never merged. So what actually guards `main` is *who
+(or what) can add the `release:ready` label* plus *your CI being required*. Keep
+at least one required check and restrict label-add permission to trusted actors.
+(On a repo with no CI at all, passing `--allow-no-checks` makes the label alone
+the merge trigger — only do that where every label-adder is trusted.)
 
 ## Conflicts are manual in this mode
 

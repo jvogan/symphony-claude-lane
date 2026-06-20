@@ -182,7 +182,6 @@ if [[ -d "$runs_dir" ]]; then
     [[ -f "$meta" ]] || continue
     total_runs=$((total_runs + 1))
 
-    issue_id="$(meta_get "$meta" issue_id)"
     model="$(meta_get "$meta" model)"
     model_tier="$(meta_get "$meta" model_tier)"
     status="$(meta_get "$meta" status)"

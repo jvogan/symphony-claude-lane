@@ -84,6 +84,15 @@ Merge evidence and deploy evidence are not lost by dropping `--wait-merge`: the
 loop still labels PRs `release:queued`, and a separate reconciler pass attaches
 deploy evidence after the fact (see Decoupled deploy evidence below).
 
+**Keep the loop alive — or make it event-driven.** `--loop` is a foreground
+poll-and-sleep in a single process; if that process dies, merging silently stops
+and nothing restarts it. For unattended operation, run the one-shot form (drop
+`--loop`) under a supervisor (cron, `launchd`, a systemd timer, or a Symphony
+lane), or use the event-driven GitHub Action template at
+[`examples/release-on-ready.yml`](examples/release-on-ready.yml), which drains
+ready + CI-green PRs on `labeled` / `check_suite: completed` / a cron backstop,
+serialized by a `concurrency` group.
+
 ## Closed-loop conflict recovery
 
 Merge Queue handles PRs that *can* rebase cleanly. A PR whose branch has drifted
@@ -336,6 +345,11 @@ Defaults are configurable with `RELEASE_MANAGER_*` env vars in `env.sh`.
   pass takes the same lock and only under `--apply`.
 - Workers do not mutate `main`.
 - Release manager serializes `main`.
+- Merge requires BOTH the `release:ready` label AND green CI: `pr_is_ready`
+  independently checks `statusCheckRollup`, so a red, pending, or check-less PR
+  is skipped (never merged) unless the operator explicitly passes
+  `--allow-no-checks`. The trust boundary is label-add permission plus required
+  checks.
 - Deployment waits poll a workflow run for the merge SHA.
 - Linear/tracker closeout is evidence-based, not just "worker said done."
 - Metrics are apply-only: no JSONL line is written in dry-run.
