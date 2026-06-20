@@ -14,6 +14,8 @@ Developers and operators who run Symphony + Linear with Codex workers and want t
 
 Symphony (Elixir) dispatches Codex workers — managing worktrees, scheduling, and process supervision. Claude workers run as interactive `claude` sessions inside detached tmux panes — launched by the orchestrator or a launcher script, not through Symphony's runtime. Workers signal completion by writing a JSON sentinel file via the bundled `bin/claude-tmux-finalize` helper; the dispatcher polls for the sentinel. Linear is the shared control plane for both: issues, state transitions, routing labels, and closeout all live there regardless of which agent executes the work.
 
+For high-volume deploys, keep release separate from worker execution. Claude and Codex workers are producers: they finish the task, open or update a PR, validate it, add the GitHub label `release:ready`, post the PR/evidence to Linear, and stop. The release-manager lane is the single consumer that owns queue/merge/deploy/Done closeout for `main`.
+
 ## Key concepts
 
 - **Task-Characteristic Routing**: The orchestrator analyzes each issue and picks the best model based on what the task requires. Labels serve as overrides.
@@ -26,6 +28,7 @@ Symphony (Elixir) dispatches Codex workers — managing worktrees, scheduling, a
 - **Sentinel JSON Contract**: Workers signal completion by writing a JSON sentinel file (schema in docs/architecture.md). The dispatcher validates the sentinel as a JSON object before extracting fields, mapping malformed sentinels to `exit_reason=sentinel_malformed` instead of silently coercing.
 - **MCP Defense-in-Depth**: The RunPod MCP and its `RUNPOD_API_KEY` env var are jointly opt-in via `CLAUDE_WORKER_ENABLE_RUNPOD=true`. A worker cannot bypass the MCP gate by calling RunPod via raw `curl` because the credentials are also withheld.
 - **Outcome Parser Compatibility**: New workers emit `symphony-outcome`; audit tools may support legacy `symphony:outcome verdict=pass` comments while refusing current failed or blocked outcomes.
+- **Release Manager Lane**: A local dry-run-first runner (`bin/release-manager`) consumes `release:ready` PRs, serializes merge-to-main through GitHub merge queue or one immediate strategy, optionally waits for deploy workflow evidence, and posts `release-manager-outcome` closeout to Linear. Workers must not merge, rebase, push to `main`, or trigger production when told "deploy."
 
 ## When to prefer Claude
 
@@ -46,7 +49,7 @@ Symphony (Elixir) dispatches Codex workers — managing worktrees, scheduling, a
 
 ## Default workflow
 
-Inspect repo -> confirm multi-model candidate -> confirm base workflow has guardrails -> analyze work patterns -> ask adopter about routing preferences -> create or update `.orchestration/claude-lane.yaml` with routing strategy, model selection criteria, privacy rules, and retention policy -> prefer same-project label routing unless stronger separation is needed -> document routing contract -> use Playwright for visual verification -> apply safe closeout and cleanup rules
+Inspect repo -> confirm multi-model candidate -> confirm base workflow has guardrails -> analyze work patterns -> ask adopter about routing preferences -> create or update `.orchestration/claude-lane.yaml` with routing strategy, model selection criteria, privacy rules, and retention policy -> prefer same-project label routing unless stronger separation is needed -> document routing contract -> add release-manager lane if workers prepare deployable PRs -> use Playwright for visual verification -> apply safe closeout and cleanup rules
 
 ## Repo structure
 
@@ -69,15 +72,18 @@ Inspect repo -> confirm multi-model candidate -> confirm base workflow has guard
 - `bin/claude-doctor` — preflight battery (env vars, deps, Linear connectivity, dispatch-lock state)
 - `bin/claude-version` — print install root/commit and worker model defaults
 - `bin/claude-tmux-finalize` — worker-invoked helper that writes the completion sentinel JSON
+- `bin/release-manager` — dry-run-first release lane for `release:ready` PRs; `--apply` is required for GitHub/Linear mutation
+- `bin/release-manager-doctor` — release lane preflight for GitHub CLI auth, Linear reachability, repo remotes, and stale locks
 - `env.sh` — source to set lane defaults (paths, model, routing label, MCP config, env allowlist) with autoset-marker idempotency
 - `mcp/worker-mcp.json` — default MCP config (Linear only)
 - `mcp/worker-mcp-runpod.json` — opt-in MCP config (Linear + RunPod, jointly gated with the RunPod env-var allowlist)
 - `settings/claude-settings.tmux.json` — per-worktree `.claude/settings.json` with bypassPermissions
-- `tests/` — fully-isolated regression tests (sentinel-malformed JSON validation, MCP opt-in branches)
+- `tests/` — fully-isolated regression tests (sentinel-malformed JSON validation, MCP opt-in branches, release-manager fake-`gh`)
 - `docs/architecture.md` — sentinel JSON contract, dispatch lock TOCTOU mitigation, autoset-marker pattern, MCP defense-in-depth
 - `docs/lessons.md` — bug-by-bug postmortems from the tmux backend build
 - `docs/linear-setup.md` — how to set up `lane:claude` + `model:*` labels in a Linear workspace
 - `docs/migration-v2-to-v3.md` — what changes if you adopted v2.0.1
+- `docs/release-manager-lane.md` — worker/release-manager split for high-volume PR queueing, merge, deploy, and Linear closeout
 
 ## Install
 

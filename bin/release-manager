@@ -1,0 +1,463 @@
+#!/usr/bin/env bash
+# release-manager — single-owner release lane for PRs produced by agents.
+#
+# Workers may create PRs and mark them release:ready. They must not merge or
+# deploy. This script is the one lane that can queue/merge PRs into the base
+# branch, wait for deploy evidence, and optionally close the Linear issue.
+set -euo pipefail
+
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+
+GRAPHQL_URL="https://api.linear.app/graphql"
+
+mode="dry-run"
+repo_path=""
+github_repo=""
+base_branch="${RELEASE_MANAGER_BASE_BRANCH:-main}"
+ready_label="${RELEASE_MANAGER_READY_LABEL:-release:ready}"
+queued_label="${RELEASE_MANAGER_QUEUED_LABEL:-release:queued}"
+merged_label="${RELEASE_MANAGER_MERGED_LABEL:-release:merged}"
+failed_label="${RELEASE_MANAGER_FAILED_LABEL:-release:failed}"
+strategy="${RELEASE_MANAGER_STRATEGY:-queue}"
+max_per_run="${RELEASE_MANAGER_MAX_PER_RUN:-3}"
+loop=false
+interval="${RELEASE_MANAGER_POLL_SECONDS:-15}"
+wait_seconds="${RELEASE_MANAGER_WAIT_SECONDS:-1800}"
+wait_merge=false
+deploy_workflow=""
+linear_updates=true
+allow_no_checks=false
+require_review=false
+
+GH_BIN="${RELEASE_MANAGER_GH_BIN:-gh}"
+locks_root="${CLAUDE_RUNS_ROOT:-$SYMPHONY_CLAUDE_ROOT/runs}"
+LOCKS_ACQUIRED=()
+RELEASE_LOCK_HELD=false
+
+usage() {
+  cat >&2 <<EOF
+Usage: $(basename "$0") --repo PATH [options]
+
+Single-owner release manager for agent-produced PRs. Dry-run is the default.
+
+Required:
+  --repo PATH                 Local git repo whose PRs should be released.
+
+Modes:
+  --dry-run                   Plan only; no GitHub/Linear mutations (default).
+  --apply                     Queue/merge candidates and optionally update Linear.
+  --loop                      Repeat forever, sleeping --interval between passes.
+
+Selection:
+  --github-repo OWNER/NAME    GitHub repo slug. Defaults from origin remote.
+  --base BRANCH               Target branch (default: $base_branch).
+  --ready-label LABEL         PR label to consume (default: $ready_label).
+  --max N                     Max PRs per pass (default: $max_per_run).
+
+Merge behavior:
+  --strategy queue|auto|squash|merge|rebase
+                              queue/auto uses gh pr merge --auto --squash.
+                              squash/merge/rebase merge immediately.
+  --wait-merge                Poll until PR is merged or timeout.
+  --wait-deploy-workflow NAME Poll a GitHub Actions workflow on the merged SHA.
+  --wait-seconds N            Timeout for merge/deploy waits (default: $wait_seconds).
+  --allow-no-checks           Do not skip PRs with no status checks.
+  --require-review            Require reviewDecision=APPROVED.
+
+Linear:
+  --no-linear                 Do not post Linear comments or move issue state.
+
+Environment:
+  RELEASE_MANAGER_GH_BIN      Override gh binary path (used by tests).
+EOF
+}
+
+die() { echo "release-manager: error: $*" >&2; exit 2; }
+log() { echo "[release-manager] $*"; }
+
+release_locks() {
+  local L
+  for L in "${LOCKS_ACQUIRED[@]:-}"; do
+    [[ -n "$L" ]] && rm -rf "$L" 2>/dev/null || true
+  done
+  return 0
+}
+trap release_locks EXIT INT TERM
+
+safe_meta_value() {
+  local name="$1" value="$2"
+  [[ "$value" != *$'\n'* ]] || die "$name contains newline"
+  [[ "$value" != *"'"* ]] || die "$name contains single quote"
+}
+
+parse_origin_slug() {
+  local url="$1"
+  case "$url" in
+    git@github.com:*)
+      url="${url#git@github.com:}"
+      url="${url%.git}"
+      ;;
+    https://github.com/*|http://github.com/*)
+      url="${url#https://github.com/}"
+      url="${url#http://github.com/}"
+      url="${url%.git}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ "$url" =~ ^[^/]+/[^/]+$ ]] || return 1
+  printf '%s\n' "$url"
+}
+
+resolve_github_repo() {
+  if [[ -n "$github_repo" ]]; then
+    printf '%s\n' "$github_repo"
+    return 0
+  fi
+  local origin
+  origin="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+  if [[ -n "$origin" ]] && parse_origin_slug "$origin" >/dev/null; then
+    parse_origin_slug "$origin"
+    return 0
+  fi
+  (cd "$repo_path" && "$GH_BIN" repo view --json nameWithOwner -q .nameWithOwner)
+}
+
+lock_dir_for() {
+  local repo_abs="$1" base="$2" label="$3" key
+  key="$(printf '%s|%s|%s' "$repo_abs" "$base" "$label" | shasum | cut -c1-12)"
+  printf '%s/.release-manager.lock-%s.d\n' "$locks_root" "$key"
+}
+
+acquire_lock() {
+  [[ "$mode" == "apply" ]] || return 0
+  "$RELEASE_LOCK_HELD" && return 0
+  mkdir -p "$locks_root" 2>/dev/null || true
+  local lock_dir holder retry
+  lock_dir="$(lock_dir_for "$repo_path" "$base_branch" "$ready_label")"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    holder=""
+    [[ -r "$lock_dir/pid" ]] && holder="$(cat "$lock_dir/pid" 2>/dev/null || echo)"
+    if [[ -z "$holder" ]]; then
+      for retry in 1 2 3 4 5; do
+        sleep 0.1
+        [[ -r "$lock_dir/pid" ]] && holder="$(cat "$lock_dir/pid" 2>/dev/null || echo)"
+        [[ -n "$holder" ]] && break
+      done
+    fi
+    if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+      die "another release-manager is running for repo=$repo_path base=$base_branch label=$ready_label (pid $holder)"
+    fi
+    log "stale release lock at $lock_dir (pid ${holder:-unknown} no such process after retry) — taking over"
+    rm -rf "$lock_dir" 2>/dev/null
+    mkdir "$lock_dir" 2>/dev/null || die "could not acquire release lock"
+  fi
+  printf '%s\n' "$$" > "$lock_dir/pid"
+  printf 'repo=%s\nbase=%s\nlabel=%s\n' "$repo_path" "$base_branch" "$ready_label" > "$lock_dir/scope"
+  LOCKS_ACQUIRED+=("$lock_dir")
+  RELEASE_LOCK_HELD=true
+}
+
+candidate_query_fields='number,title,url,headRefName,baseRefName,isDraft,mergeStateStatus,reviewDecision,statusCheckRollup,labels'
+
+list_candidates() {
+  "$GH_BIN" pr list \
+    -R "$github_repo" \
+    --base "$base_branch" \
+    --state open \
+    --label "$ready_label" \
+    --json "$candidate_query_fields"
+}
+
+check_state() {
+  jq -r '
+    def norm:
+      tostring | ascii_upcase;
+    def value:
+      .conclusion? // .state? // .status? // "";
+    [ .statusCheckRollup[]? | value | norm ] as $checks
+    | if ($checks | length) == 0 then "none"
+      elif any($checks[]; . == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED") then "fail"
+      elif all($checks[]; . == "SUCCESS" or . == "NEUTRAL" or . == "SKIPPED" or . == "COMPLETED") then "pass"
+      else "pending"
+      end
+  '
+}
+
+pr_is_ready() {
+  local pr_json="$1" checks merge_state draft review
+  draft="$(jq -r '.isDraft // false' <<<"$pr_json")"
+  merge_state="$(jq -r '.mergeStateStatus // "UNKNOWN"' <<<"$pr_json")"
+  review="$(jq -r '.reviewDecision // ""' <<<"$pr_json")"
+  checks="$(check_state <<<"$pr_json")"
+
+  [[ "$draft" != "true" ]] || { echo "draft"; return 1; }
+  case "$merge_state" in
+    DIRTY|DRAFT|BLOCKED) echo "merge_state=$merge_state"; return 1 ;;
+  esac
+  if "$require_review" && [[ "$review" != "APPROVED" ]]; then
+    echo "review=$review"
+    return 1
+  fi
+  case "$checks" in
+    pass) : ;;
+    none) "$allow_no_checks" || { echo "checks=none"; return 1; } ;;
+    *) echo "checks=$checks"; return 1 ;;
+  esac
+  echo "ready"
+}
+
+infer_issue_id() {
+  local text="$1"
+  printf '%s\n' "$text" | perl -ne 'if (/\b([A-Z][A-Z0-9]+-[0-9]+)\b/) { print "$1\n"; exit }'
+}
+
+linear_graphql() {
+  local q="$1" v="${2:-{}}"
+  [[ -n "${LINEAR_API_KEY:-}" ]] || return 1
+  local header payload
+  header="$(mktemp)"
+  payload="$(jq -nc --arg q "$q" --argjson v "$v" '{query:$q,variables:$v}')"
+  printf 'Authorization: %s' "$LINEAR_API_KEY" > "$header"
+  set +e
+  curl -sf "$GRAPHQL_URL" -H @"$header" -H "Content-Type: application/json" --data "$payload"
+  local rc=$?
+  set -e
+  rm -f "$header"
+  return "$rc"
+}
+
+linear_issue_uuid() {
+  local issue_id="$1" team_key num
+  team_key="${issue_id%%-*}"
+  num="${issue_id##*-}"
+  linear_graphql \
+    'query($tk:String!,$n:Float!){issues(filter:{team:{key:{eq:$tk}},number:{eq:$n}},first:1){nodes{id identifier state{name}}}}' \
+    "$(jq -nc --arg tk "$team_key" --argjson n "$num" '{tk:$tk,n:$n}')" |
+    jq -r '.data.issues.nodes[0].id // empty'
+}
+
+linear_state_id() {
+  local issue_id="$1" state_name="$2" team_key
+  team_key="${issue_id%%-*}"
+  linear_graphql \
+    'query($tk:String!,$name:String!){teams(filter:{key:{eq:$tk}},first:1){nodes{states{nodes{id name}}}}}' \
+    "$(jq -nc --arg tk "$team_key" --arg name "$state_name" '{tk:$tk,name:$name}')" |
+    jq -r --arg name "$state_name" '.data.teams.nodes[0].states.nodes[] | select(.name == $name) | .id' | head -1
+}
+
+linear_comment() {
+  local issue_uuid="$1" body="$2"
+  linear_graphql \
+    'mutation($issueId:String!,$body:String!){commentCreate(input:{issueId:$issueId,body:$body}){success}}' \
+    "$(jq -nc --arg issueId "$issue_uuid" --arg body "$body" '{issueId:$issueId,body:$body}')" >/dev/null
+}
+
+linear_move_issue() {
+  local issue_uuid="$1" state_id="$2"
+  [[ -n "$state_id" ]] || return 1
+  linear_graphql \
+    'mutation($id:String!,$stateId:String!){issueUpdate(id:$id,input:{stateId:$stateId}){success}}' \
+    "$(jq -nc --arg id "$issue_uuid" --arg stateId "$state_id" '{id:$id,stateId:$stateId}')" >/dev/null
+}
+
+post_linear_evidence() {
+  "$linear_updates" || return 0
+  [[ -n "${LINEAR_API_KEY:-}" ]] || { log "Linear skipped: LINEAR_API_KEY unset"; return 0; }
+
+  local pr_number="$1" pr_url="$2" status="$3" detail="$4" title="$5" head="$6" issue_id issue_uuid state_id
+  issue_id="$(infer_issue_id "$head $title $detail")"
+  [[ -n "$issue_id" ]] || { log "Linear skipped for PR #$pr_number: no issue id found"; return 0; }
+  issue_uuid="$(linear_issue_uuid "$issue_id" 2>/dev/null || true)"
+  [[ -n "$issue_uuid" ]] || { log "Linear skipped for $issue_id: issue not found"; return 0; }
+
+  if ! linear_comment "$issue_uuid" "<!-- release-manager-outcome -->
+status: $status
+pr: $pr_url
+base: $base_branch
+detail: $detail
+managed_by: release-manager
+"; then
+    log "Linear comment failed for $issue_id"
+    return 0
+  fi
+
+  if [[ "$status" == "merged" || "$status" == "deployed" ]]; then
+    state_id="$(linear_state_id "$issue_id" "${RELEASE_MANAGER_LINEAR_DONE_STATE:-Done}" 2>/dev/null || true)"
+    linear_move_issue "$issue_uuid" "$state_id" 2>/dev/null || log "Linear state move failed for $issue_id"
+  elif [[ "$status" == "failed" ]]; then
+    state_id="$(linear_state_id "$issue_id" "${RELEASE_MANAGER_LINEAR_FAILURE_STATE:-Todo}" 2>/dev/null || true)"
+    linear_move_issue "$issue_uuid" "$state_id" 2>/dev/null || true
+  fi
+}
+
+label_transition() {
+  local pr="$1" add="$2" remove="$3"
+  "$GH_BIN" pr edit "$pr" -R "$github_repo" --remove-label "$remove" --add-label "$add" >/dev/null 2>&1 || true
+}
+
+merge_pr() {
+  local pr="$1"
+  case "$strategy" in
+    queue|auto) "$GH_BIN" pr merge "$pr" -R "$github_repo" --auto --squash --delete-branch ;;
+    squash)     "$GH_BIN" pr merge "$pr" -R "$github_repo" --squash --delete-branch ;;
+    merge)      "$GH_BIN" pr merge "$pr" -R "$github_repo" --merge --delete-branch ;;
+    rebase)     "$GH_BIN" pr merge "$pr" -R "$github_repo" --rebase --delete-branch ;;
+    *) die "unsupported strategy: $strategy" ;;
+  esac
+}
+
+wait_for_merge() {
+  local pr="$1" deadline state merged_at sha view
+  deadline=$(( $(date +%s) + wait_seconds ))
+  while [[ $(date +%s) -lt "$deadline" ]]; do
+    view="$("$GH_BIN" pr view "$pr" -R "$github_repo" --json state,mergedAt,mergeCommit,url 2>/dev/null || echo '{}')"
+    state="$(jq -r '.state // ""' <<<"$view")"
+    merged_at="$(jq -r '.mergedAt // ""' <<<"$view")"
+    sha="$(jq -r '.mergeCommit.oid // ""' <<<"$view")"
+    if [[ "$state" == "MERGED" || -n "$merged_at" ]]; then
+      printf '%s\n' "$sha"
+      return 0
+    fi
+    sleep "$interval"
+  done
+  return 1
+}
+
+wait_for_deploy_workflow() {
+  local workflow="$1" sha="$2" deadline runs status conclusion url
+  [[ -n "$workflow" && -n "$sha" ]] || return 0
+  deadline=$(( $(date +%s) + wait_seconds ))
+  while [[ $(date +%s) -lt "$deadline" ]]; do
+    runs="$("$GH_BIN" run list -R "$github_repo" --workflow "$workflow" --branch "$base_branch" --json databaseId,headSha,status,conclusion,url,createdAt -L 20 2>/dev/null || echo '[]')"
+    status="$(jq -r --arg sha "$sha" '[.[] | select(.headSha == $sha)][0].status // ""' <<<"$runs")"
+    conclusion="$(jq -r --arg sha "$sha" '[.[] | select(.headSha == $sha)][0].conclusion // ""' <<<"$runs")"
+    url="$(jq -r --arg sha "$sha" '[.[] | select(.headSha == $sha)][0].url // ""' <<<"$runs")"
+    if [[ "$status" == "completed" ]]; then
+      [[ "$conclusion" == "success" ]] && { printf '%s\n' "$url"; return 0; }
+      return 1
+    fi
+    sleep "$interval"
+  done
+  return 1
+}
+
+process_once() {
+  acquire_lock
+  log "repo=$github_repo base=$base_branch label=$ready_label mode=$mode strategy=$strategy max=$max_per_run"
+
+  local candidates count pr_json pr ready_rc reason title url head processed merge_sha deploy_url
+  candidates="$(list_candidates)"
+  count="$(jq 'length' <<<"$candidates")"
+  log "found $count candidate PR(s)"
+  [[ "$count" -gt 0 ]] || return 0
+
+  processed=0
+  while IFS= read -r pr_json; do
+    pr="$(jq -r '.number' <<<"$pr_json")"
+    title="$(jq -r '.title' <<<"$pr_json")"
+    url="$(jq -r '.url' <<<"$pr_json")"
+    head="$(jq -r '.headRefName' <<<"$pr_json")"
+    set +e
+    reason="$(pr_is_ready "$pr_json")"
+    ready_rc=$?
+    set -e
+    if [[ "$ready_rc" -ne 0 ]]; then
+      echo "  SKIP  #$pr  $reason  $title"
+      continue
+    fi
+    echo "  READY #$pr  $head  $title"
+    processed=$((processed + 1))
+    if [[ "$mode" != "apply" ]]; then
+      echo "        dry-run: would queue/merge $url"
+    else
+      label_transition "$pr" "$queued_label" "$ready_label"
+      if merge_pr "$pr"; then
+        merge_sha=""
+        if "$wait_merge" || [[ -n "$deploy_workflow" ]]; then
+          merge_sha="$(wait_for_merge "$pr" || true)"
+        fi
+        detail="merge requested via strategy=$strategy"
+        [[ -n "$merge_sha" ]] && detail="$detail merge_sha=$merge_sha"
+        if [[ -n "$deploy_workflow" ]]; then
+          if [[ -z "$merge_sha" ]]; then
+            label_transition "$pr" "$failed_label" "$queued_label"
+            post_linear_evidence "$pr" "$url" "failed" "$detail merge_wait_timeout=true deploy_workflow=$deploy_workflow" "$title" "$head"
+          elif deploy_url="$(wait_for_deploy_workflow "$deploy_workflow" "$merge_sha" 2>/dev/null)"; then
+            label_transition "$pr" "$merged_label" "$queued_label"
+            post_linear_evidence "$pr" "$url" "deployed" "$detail deploy=$deploy_url" "$title" "$head"
+          else
+            label_transition "$pr" "$failed_label" "$queued_label"
+            post_linear_evidence "$pr" "$url" "failed" "$detail deploy_workflow_failed=$deploy_workflow" "$title" "$head"
+          fi
+        elif [[ -n "$merge_sha" ]]; then
+          label_transition "$pr" "$merged_label" "$queued_label"
+          post_linear_evidence "$pr" "$url" "merged" "$detail" "$title" "$head"
+        else
+          post_linear_evidence "$pr" "$url" "queued" "$detail" "$title" "$head"
+        fi
+      else
+        label_transition "$pr" "$failed_label" "$queued_label"
+        post_linear_evidence "$pr" "$url" "failed" "merge command failed strategy=$strategy" "$title" "$head"
+      fi
+    fi
+    [[ "$processed" -lt "$max_per_run" ]] || break
+  done < <(jq -c '.[]' <<<"$candidates")
+
+  log "processed $processed ready PR(s)"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) repo_path="${2:?--repo requires a path}"; shift 2 ;;
+    --github-repo) github_repo="${2:?--github-repo requires OWNER/NAME}"; shift 2 ;;
+    --base) base_branch="${2:?--base requires branch}"; shift 2 ;;
+    --ready-label) ready_label="${2:?--ready-label requires label}"; shift 2 ;;
+    --max) max_per_run="${2:?--max requires a number}"; shift 2 ;;
+    --strategy) strategy="${2:?--strategy requires queue|auto|squash|merge|rebase}"; shift 2 ;;
+    --dry-run) mode="dry-run"; shift ;;
+    --apply) mode="apply"; shift ;;
+    --loop) loop=true; shift ;;
+    --interval) interval="${2:?--interval requires seconds}"; shift 2 ;;
+    --wait-seconds) wait_seconds="${2:?--wait-seconds requires seconds}"; shift 2 ;;
+    --wait-merge) wait_merge=true; shift ;;
+    --wait-deploy-workflow) deploy_workflow="${2:?--wait-deploy-workflow requires workflow name}"; wait_merge=true; shift 2 ;;
+    --allow-no-checks) allow_no_checks=true; shift ;;
+    --require-review) require_review=true; shift ;;
+    --no-linear) linear_updates=false; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$repo_path" ]] || { usage; exit 2; }
+[[ -d "$repo_path/.git" ]] || die "not a git repo: $repo_path"
+repo_path="$(cd "$repo_path" && pwd)"
+[[ "$max_per_run" =~ ^[0-9]+$ && "$max_per_run" -gt 0 ]] || die "--max must be > 0"
+[[ "$interval" =~ ^[0-9]+$ && "$interval" -gt 0 ]] || die "--interval must be > 0"
+[[ "$wait_seconds" =~ ^[0-9]+$ && "$wait_seconds" -gt 0 ]] || die "--wait-seconds must be > 0"
+case "$strategy" in queue|auto|squash|merge|rebase) ;; *) die "unsupported strategy: $strategy" ;; esac
+for value in "$base_branch" "$ready_label" "$queued_label" "$merged_label" "$failed_label" "$strategy"; do
+  safe_meta_value "argument" "$value"
+done
+
+command -v jq >/dev/null 2>&1 || die "jq is required"
+command -v git >/dev/null 2>&1 || die "git is required"
+command -v shasum >/dev/null 2>&1 || die "shasum is required"
+command -v "$GH_BIN" >/dev/null 2>&1 || die "gh not found: $GH_BIN"
+
+github_repo="$(resolve_github_repo)"
+[[ "$github_repo" =~ ^[^/]+/[^/]+$ ]] || die "could not resolve GitHub repo slug; pass --github-repo OWNER/NAME"
+
+if [[ "$mode" == "dry-run" ]]; then
+  log "DRY RUN: pass --apply to queue/merge PRs or update Linear"
+fi
+
+while true; do
+  process_once
+  "$loop" || break
+  log "sleeping ${interval}s"
+  sleep "$interval"
+done

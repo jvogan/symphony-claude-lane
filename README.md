@@ -121,15 +121,17 @@ For the expanded setup path, see [`docs/quickstart.md`](docs/quickstart.md).
 3. Analyze the repo's work patterns and ask about routing preferences.
 4. Create a routing profile (`.orchestration/claude-lane.yaml`) with model selection criteria, label overrides, privacy rules, and cleanup policy.
 5. Set up the Claude worker launcher — the secure process for dispatching interactive `claude` sessions in tmux panes against Linear issues in isolated git worktrees.
-6. Document the routing contract so both human operators and agents know how tasks get dispatched.
+6. Add the release-manager contract if workers will say "deploy": workers mark PRs `release:ready`, and one release manager owns queue/merge/deploy/Done closeout.
+7. Document the routing contract so both human operators and agents know how tasks get dispatched and released.
 
 **Dispatch** (how it runs after setup):
 
 1. The orchestrator plans issues in Linear with routing labels or task analysis.
 2. Symphony picks up Codex-routed issues and dispatches Codex workers through its Elixir runtime.
 3. The Claude launcher picks up Claude-routed issues and dispatches interactive Claude sessions in tmux panes in isolated worktrees.
-4. Both types of workers post structured outcomes back to Linear when done.
-5. The orchestrator reviews all output in one place, integrates changes, and promotes learnings.
+4. Both types of workers post structured outcomes back to Linear when done and, when ready to release, put the GitHub PR in `release:ready`.
+5. A single release manager consumes `release:ready` PRs, queues or merges them, optionally waits for deploy evidence, and posts evidence-based closeout to Linear.
+6. The orchestrator reviews all output in one place and promotes learnings.
 
 **Routing strategies:**
 
@@ -181,6 +183,7 @@ That file records the adopter's decisions about:
 - preferred Claude models
 - which base-workflow guardrails all workers inherit
 - closeout and retry behavior
+- release-manager ownership of merge-to-main and deploy closeout when workers are allowed to prepare deployable PRs
 - cleanup and retention policy for worktrees, snapshots, and repo-specific storage hotspots
 - privacy rules for issue bodies, comments, screenshots, traces, and other artifacts
 
@@ -202,16 +205,19 @@ Those decisions belong in the adopter repo, not in this shared skill.
 | `bin/claude-doctor` | Preflight battery — verify env, deps, Linear connectivity, lane state |
 | `bin/claude-version` | Print install root, branch/commit, default model env, and `claude` CLI version |
 | `bin/claude-tmux-finalize` | Worker-invoked helper that writes the completion sentinel JSON |
+| `bin/release-manager` | Local release lane runner for `release:ready` PRs; dry-run by default, explicit `--apply` for GitHub/Linear mutation |
+| `bin/release-manager-doctor` | Preflight battery for GitHub CLI auth, Linear reachability, repo remotes, and release-manager locks |
 | `env.sh` | Source to set lane defaults (paths, model, routing label, MCP config, env allowlist) |
 | `mcp/worker-mcp.json` | Default MCP config (Linear only) |
 | `mcp/worker-mcp-runpod.json` | Opt-in MCP config (Linear + RunPod) |
 | `settings/claude-settings.tmux.json` | Per-worktree `.claude/settings.json` with `bypassPermissions` |
-| `tests/` | Three fully-isolated regression tests (sentinel-malformed, MCP opt-in, env isolation) |
+| `tests/` | Four fully-isolated regression tests (sentinel-malformed, MCP opt-in, env isolation, release-manager fake-`gh`) |
 | `docs/architecture.md` | Sentinel JSON contract, dispatch lock semantics, autoset-marker pattern |
 | `docs/backend-options.md` | How to choose tmux, `claude -p`, or a hybrid backend intentionally |
 | `docs/lessons.md` | Bug-by-bug postmortems from the tmux backend build |
 | `docs/linear-setup.md` | How to set up `lane:claude` + `model:*` labels in a Linear workspace |
 | `docs/migration-v2-to-v3.md` | What changes if you adopted v2.0.1 |
+| `docs/release-manager-lane.md` | Worker/release-manager split for high-volume PR queueing, merge, deploy, and Linear closeout |
 | `llms.txt` | Agent-oriented summary of the repo |
 
 ## Design defaults
@@ -224,6 +230,7 @@ Those decisions belong in the adopter repo, not in this shared skill.
 - **Repo-local routing profiles** instead of chat-only preferences
 - **Fail-closed Claude routing guards** before launching full-access workers
 - **Operator-reviewed closeout by default**, with self-close allowed only where proven safe
+- **Single-owner release management** for merge-to-main and deployment: workers prepare PRs, one release manager serializes `main`
 - **Explicit closeout state** rendered into worker prompts
 - **Worker environment allowlists** instead of inheriting the full operator shell
 - **No-side-effect dry-runs** for launcher validation
@@ -240,6 +247,7 @@ These are the operational defaults the lane assumes. Operator-adapted launchers 
 - **Explicit routing required.** Workers refuse to dispatch unless the issue carries `lane:claude` (or a project name matching `$CLAUDE_ALLOWED_PROJECT_REGEX`, or a configured assignee). Override only with `--allow-unrouted` for deliberate trusted dispatch.
 - **Allowlisted worker environment.** The worker session is started with `env -i $allowlisted=value … claude …` as the tmux session command, so the worker sees only what the dispatcher explicitly forwards — not the full operator shell. `tmux new-session -e VAR=value` only *adds* to the session env; it does not *restrict*, so it is not sufficient on its own.
 - **In Review by default.** Successful workers move issues to `In Review` and stop. Use `--self-close` only on trusted direct-Done flows.
+- **Workers do not own `main`.** When told "deploy", workers prepare or update a PR, validate it, add `release:ready`, post evidence, and stop. Only the release-manager lane queues, merges, deploys, or moves the issue to `Done` from merge/deploy evidence.
 - **Cleanup requires integration verification.** Don't remove worktrees just because the tracker says `Done` — verify the branch was actually merged or the snapshot promoted first.
 - **Fallback outcome on failure.** When a worker dies before posting its outcome, a dispatcher should post a fallback `<!-- symphony-outcome -->` comment and move the issue to `$CLAUDE_TMUX_FAILURE_STATE` (default `Todo`). Prevents stuck-in-In-Progress tickets.
 - **First-launch dialogs handled defensively.** Real Claude Code shows trust + bypass-permissions dialogs in interactive mode (no flag suppresses them). The dispatcher must detect and dismiss them via `tmux capture-pane` + `tmux send-keys` before pasting the prompt. See `docs/lessons.md`.
@@ -256,7 +264,7 @@ The reference launcher spawns an interactive `claude` session inside a detached 
 It does **not** bundle:
 
 - a machine-specific `env.sh` or auth setup
-- a background watchdog or queue poller
+- a host-level supervisor for keeping worker or release-manager loops alive
 - a one-size-fits-all Linear schema
 - hardcoded assumptions about your repo layout or branch strategy
 - an implicit cleanup daemon or retention policy
