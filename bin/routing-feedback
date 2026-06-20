@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# routing-feedback — read-only analyzer of Claude run outcomes for routing review.
+#
+# Aggregates per-model and per-task-characteristic outcomes from the local run
+# directory ($CLAUDE_RUNS_ROOT/*/meta.env) and prints advisory routing signals.
+#
+# This tool is deliberately constrained:
+#   - READ-ONLY: it NEVER writes the routing profile and has no --apply mode.
+#   - OFFLINE: it NEVER calls Linear or GitHub. There is no network code path.
+#   - SAFE PARSE: meta.env is worker-written and therefore untrusted. It is
+#     parsed with grep/cut ONLY — never `source`d or `eval`d.
+#
+# Model attribution lives in the local meta.env (the `model`/`model_tier`
+# fields), NOT in Linear. Codex-side outcomes are not captured here, so the
+# suggestions are Claude-side performance signals for human review only.
+#
+# Usage:
+#   routing-feedback [--runs DIR] [--profile PATH] [--repo PATH] [--min-samples N]
+#
+# Options:
+#   --runs DIR          Run directory to scan (default: $CLAUDE_RUNS_ROOT).
+#   --repo PATH         Repo root used to locate the default profile.
+#   --profile PATH      Routing profile YAML (default:
+#                       .orchestration/claude-lane.yaml under --repo or CWD).
+#   --min-samples N     Min samples per cell before a suggestion (default: 5).
+#   -h, --help          Show this help.
+# =====
+set -euo pipefail
+
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+
+runs_dir="${CLAUDE_RUNS_ROOT:-$SYMPHONY_CLAUDE_ROOT/runs}"
+repo_path=""
+profile_path=""
+min_samples=5
+
+usage() { sed -n '/^# Usage:/,/^# =====/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d' >&2; }
+die() { echo "routing-feedback: error: $*" >&2; exit 2; }
+log() { echo "[routing-feedback] $*"; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runs)        runs_dir="${2:?--runs requires a directory}"; shift 2 ;;
+    --repo)        repo_path="${2:?--repo requires a path}"; shift 2 ;;
+    --profile)     profile_path="${2:?--profile requires a path}"; shift 2 ;;
+    --min-samples) min_samples="${2:?--min-samples requires a number}"; shift 2 ;;
+    -h|--help)     usage; exit 0 ;;
+    *)             die "unknown argument: $1" ;;
+  esac
+done
+
+[[ "$min_samples" =~ ^[0-9]+$ && "$min_samples" -gt 0 ]] || die "--min-samples must be > 0"
+command -v jq >/dev/null 2>&1 || die "jq is required"
+
+# Resolve the default profile path relative to --repo (or CWD) when not given.
+if [[ -z "$profile_path" ]]; then
+  if [[ -n "$repo_path" ]]; then
+    profile_path="$repo_path/.orchestration/claude-lane.yaml"
+  else
+    profile_path="$PWD/.orchestration/claude-lane.yaml"
+  fi
+fi
+
+# ---------- meta.env parsing (grep/cut only; never source/eval) ----------
+# Values are written single-quoted: key='value'. Extract the first matching
+# line, strip the "key=" prefix, then strip one layer of surrounding single
+# quotes. Untrusted content is never executed.
+meta_get() {
+  local file="$1" key="$2" line val
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | head -n1 || true)"
+  [[ -n "$line" ]] || { printf '%s' ""; return 0; }
+  val="${line#*=}"
+  # Strip a single pair of surrounding single quotes if present.
+  if [[ "$val" == \'*\' ]]; then
+    val="${val#\'}"
+    val="${val%\'}"
+  fi
+  printf '%s' "$val"
+}
+
+# ---------- ISO-8601 UTC -> epoch (GNU first, BSD fallback, null on failure) ----------
+# Returns the epoch on stdout, or nothing (empty) if the timestamp cannot be
+# parsed. A parse failure yields null downstream, never a crash.
+iso_to_epoch() {
+  local ts="$1" epoch
+  [[ -n "$ts" ]] || { printf '%s' ""; return 0; }
+  if epoch="$(date -u -d "$ts" +%s 2>/dev/null)"; then
+    printf '%s' "$epoch"; return 0
+  fi
+  if epoch="$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null)"; then
+    printf '%s' "$epoch"; return 0
+  fi
+  printf '%s' ""
+}
+
+# ---------- Profile reads (grep-only; tolerate a missing file) ----------
+# schema_version is a scalar at column 0.
+profile_schema_version() {
+  [[ -r "$profile_path" ]] || { printf '%s' ""; return 0; }
+  grep -E '^schema_version:' "$profile_path" 2>/dev/null | head -n1 |
+    sed -E 's/^schema_version:[[:space:]]*//; s/[[:space:]]*(#.*)?$//' || true
+}
+
+# Extract the list items under a top-level YAML list key (lines like "  - foo").
+# Stops at the next non-indented, non-comment, non-blank line.
+profile_list() {
+  local key="$1"
+  [[ -r "$profile_path" ]] || return 0
+  awk -v key="$key" '
+    $0 ~ "^"key":[[:space:]]*$" { collecting=1; next }
+    collecting==1 {
+      if ($0 ~ /^[[:space:]]*-[[:space:]]+/) {
+        item=$0
+        sub(/^[[:space:]]*-[[:space:]]+/, "", item)
+        sub(/[[:space:]]*(#.*)?$/, "", item)
+        gsub(/^["'"'"']|["'"'"']$/, "", item)
+        if (item != "") print item
+        next
+      }
+      if ($0 ~ /^[[:space:]]*#/ || $0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^[^[:space:]]/) { collecting=0 }
+    }
+  ' "$profile_path" 2>/dev/null || true
+}
+
+# ---------- Read profile routing lists once ----------
+schema_version="$(profile_schema_version)"
+schema_ok=true
+if [[ -z "$schema_version" ]]; then
+  schema_ok=false
+elif [[ "$schema_version" != "2" ]]; then
+  schema_ok=false
+fi
+
+# Build a label -> characteristic lookup. Characteristics are the bucket names
+# we report; the override lists are the most authoritative.
+declare -a always_claude always_codex prefer_claude prefer_codex
+if [[ -r "$profile_path" ]]; then
+  while IFS= read -r l; do [[ -n "$l" ]] && always_claude+=("$l"); done < <(profile_list always_route_to_claude)
+  while IFS= read -r l; do [[ -n "$l" ]] && always_codex+=("$l"); done < <(profile_list always_route_to_codex)
+  while IFS= read -r l; do [[ -n "$l" ]] && prefer_claude+=("$l"); done < <(profile_list prefer_claude_when)
+  while IFS= read -r l; do [[ -n "$l" ]] && prefer_codex+=("$l"); done < <(profile_list prefer_codex_when)
+fi
+
+# Map a single label or routing token to a characteristic bucket. Returns the
+# bucket on stdout, or empty if the token is not recognized.
+characteristic_for_token() {
+  local tok="$1" item
+  for item in "${always_claude[@]:-}"; do [[ -n "$item" && "$tok" == "$item" ]] && { printf 'route:claude'; return 0; }; done
+  for item in "${always_codex[@]:-}";  do [[ -n "$item" && "$tok" == "$item" ]] && { printf 'route:codex';  return 0; }; done
+  for item in "${prefer_claude[@]:-}"; do [[ -n "$item" && "$tok" == "$item" ]] && { printf '%s' "$item"; return 0; }; done
+  for item in "${prefer_codex[@]:-}";  do [[ -n "$item" && "$tok" == "$item" ]] && { printf '%s' "$item"; return 0; }; done
+  printf '%s' ""
+}
+
+# Derive the characteristic for a run from its labels/routing hints. We accept a
+# comma- or space-separated list of tokens (labels= or routing= in meta.env).
+# The first token that maps to a known characteristic wins; otherwise 'unknown'.
+derive_characteristic() {
+  local hint="$1" tok mapped
+  [[ -n "$hint" ]] || { printf 'unknown'; return 0; }
+  # Normalize separators (comma -> space) and iterate tokens.
+  local norm="${hint//,/ }"
+  for tok in $norm; do
+    mapped="$(characteristic_for_token "$tok")"
+    [[ -n "$mapped" ]] && { printf '%s' "$mapped"; return 0; }
+  done
+  printf 'unknown'
+}
+
+# ---------- Build a JSON array of run records ----------
+# Each record: {model, model_tier, status, exit_reason, characteristic,
+#               duration_s, has_model}. duration_s is a number or null.
+records="[]"
+total_runs=0
+runs_with_model=0
+runs_unknown_model=0
+
+if [[ -d "$runs_dir" ]]; then
+  for meta in "$runs_dir"/*/meta.env; do
+    [[ -f "$meta" ]] || continue
+    total_runs=$((total_runs + 1))
+
+    issue_id="$(meta_get "$meta" issue_id)"
+    model="$(meta_get "$meta" model)"
+    model_tier="$(meta_get "$meta" model_tier)"
+    status="$(meta_get "$meta" status)"
+    exit_reason="$(meta_get "$meta" exit_reason)"
+    start_time="$(meta_get "$meta" start_time)"
+    end_time="$(meta_get "$meta" end_time)"
+    routing="$(meta_get "$meta" routing)"
+    labels="$(meta_get "$meta" labels)"
+
+    # Attribution coverage: did this run record a model at all?
+    local_model="$model"
+    if [[ -n "$local_model" ]]; then
+      runs_with_model=$((runs_with_model + 1))
+    else
+      runs_unknown_model=$((runs_unknown_model + 1))
+      local_model="unknown"
+    fi
+
+    # Duration (null on any parse failure).
+    duration_json="null"
+    s_epoch="$(iso_to_epoch "$start_time")"
+    e_epoch="$(iso_to_epoch "$end_time")"
+    if [[ -n "$s_epoch" && -n "$e_epoch" ]]; then
+      d=$((e_epoch - s_epoch))
+      [[ "$d" -ge 0 ]] && duration_json="$d"
+    fi
+
+    # Characteristic from labels first, else routing hint, else unknown.
+    char_hint="$labels"
+    [[ -z "$char_hint" ]] && char_hint="$routing"
+    characteristic="$(derive_characteristic "$char_hint")"
+
+    [[ -n "$exit_reason" ]] || exit_reason="(none)"
+    [[ -n "$status" ]] || status="(none)"
+
+    rec="$(jq -nc \
+      --arg model "$local_model" \
+      --arg model_tier "$model_tier" \
+      --arg status "$status" \
+      --arg exit_reason "$exit_reason" \
+      --arg characteristic "$characteristic" \
+      --argjson duration "$duration_json" \
+      --argjson has_model "$([[ "$model" != "" ]] && echo true || echo false)" \
+      '{model:$model, model_tier:$model_tier, status:$status, exit_reason:$exit_reason, characteristic:$characteristic, duration_s:$duration, has_model:$has_model}')"
+    records="$(jq -c --argjson r "$rec" '. + [$r]' <<<"$records")"
+  done
+fi
+
+# ---------- Aggregation in jq ----------
+# Pass-rate: status == "completed" counts as pass; "failed"/"blocked" count as
+# fail. Other statuses (e.g. "running", "(none)") are counted in n but excluded
+# from the pass/fail denominator so an in-flight run never skews the rate.
+# median + p90 over non-null duration_s. exit_reason histogram per cell.
+aggregate() {
+  local group_key="$1"
+  jq -r --arg gk "$group_key" --argjson min "$min_samples" '
+    def is_pass: . == "completed" or . == "success";
+    def is_fail: . == "failed"   or . == "blocked";
+    def pct($num; $den): if $den == 0 then "n/a" else (($num * 100 / $den) | floor | tostring + "%") end;
+    def percentile($p):
+      ( sort ) as $s
+      | ($s | length) as $n
+      | if $n == 0 then null
+        else
+          ( (($p / 100) * ($n - 1)) ) as $rank
+          | ($rank | floor) as $lo
+          | ($rank | ceil) as $hi
+          | if $lo == $hi then $s[$lo]
+            else ( $s[$lo] + (($s[$hi] - $s[$lo]) * ($rank - $lo)) ) end
+        end;
+    group_by(.[$gk])
+    | map({
+        key: (.[0][$gk]),
+        n: length,
+        pass: ([.[] | select(.status | is_pass)] | length),
+        fail: ([.[] | select(.status | is_fail)] | length),
+        durations: ([.[] | .duration_s | select(. != null)]),
+        exits: (reduce .[] as $r ({}; .[$r.exit_reason] = ((.[$r.exit_reason] // 0) + 1)))
+      })
+    | sort_by(-.n)
+    | .[]
+    | (.pass + .fail) as $den
+    | (.durations | length) as $dn
+    | (.durations | percentile(50)) as $med
+    | (.durations | percentile(90)) as $p90
+    | "  " + (.key | tostring)
+      + "  n=" + (.n | tostring)
+      + "  pass-rate=" + pct(.pass; $den) + " (" + (.pass|tostring) + "/" + ($den|tostring) + ")"
+      + "  median_s=" + (if $med == null then "n/a" else ($med | floor | tostring) end)
+      + "  p90_s=" + (if $p90 == null then "n/a" else ($p90 | floor | tostring) end)
+      + (if $dn < .n then "  [duration n=" + ($dn|tostring) + "]" else "" end)
+      + "\n      exit_reasons: "
+      + (.exits | to_entries | sort_by(-.value) | map(.key + "=" + (.value|tostring)) | join(", "))
+  ' <<<"$records"
+}
+
+# ---------- Suggestions (advisory text only; never a file diff) ----------
+# Emitted only for cells with n >= min-samples AND only when the schema gate
+# passed. Honest about Codex-blindness: we never propose moving work TO Codex.
+suggestions_for() {
+  local group_key="$1" group_label="$2"
+  jq -r --arg gk "$group_key" --arg gl "$group_label" --argjson min "$min_samples" '
+    def is_pass: . == "completed" or . == "success";
+    def is_fail: . == "failed"   or . == "blocked";
+    group_by(.[$gk])
+    | map({
+        key: (.[0][$gk]),
+        n: length,
+        pass: ([.[] | select(.status | is_pass)] | length),
+        fail: ([.[] | select(.status | is_fail)] | length)
+      })
+    | map(. + {den: (.pass + .fail)})
+    | map(select(.n >= $min and .den > 0))
+    | sort_by(.pass / .den)
+    | .[]
+    | (.pass * 100 / .den | floor) as $rate
+    | select($rate < 70)
+    | "  - " + $gl + " \"" + (.key|tostring) + "\" has low pass-rate ("
+      + ($rate|tostring) + "%, n=" + (.n|tostring)
+      + ", pass=" + (.pass|tostring) + "/" + (.den|tostring)
+      + ") — consider review."
+  ' <<<"$records"
+}
+
+# ---------- Output (stdout only) ----------
+echo "routing-feedback — read-only routing signal report"
+echo "runs: $runs_dir"
+echo "profile: $profile_path"
+echo "min-samples: $min_samples"
+echo ""
+
+if [[ ! -d "$runs_dir" ]]; then
+  log "runs directory not found: $runs_dir (nothing to analyze)"
+fi
+
+if [[ "$schema_ok" != "true" ]]; then
+  if [[ -z "$schema_version" ]]; then
+    echo "WARNING: profile schema_version missing (profile: $profile_path) — emitting ADVISORY-ONLY; no concrete suggestions."
+  else
+    echo "WARNING: profile schema_version=$schema_version != 2 (profile: $profile_path) — emitting ADVISORY-ONLY; no concrete suggestions."
+  fi
+  echo ""
+fi
+
+echo "== Attribution coverage =="
+echo "  runs scanned: $total_runs   with model: $runs_with_model   unknown model: $runs_unknown_model"
+echo "  NOTE: model attribution is read from local meta.env (model/model_tier), not Linear."
+echo ""
+
+echo "== By model =="
+if [[ "$total_runs" -gt 0 ]]; then
+  aggregate model
+else
+  echo "  (no runs)"
+fi
+echo ""
+
+echo "== By task-characteristic =="
+if [[ "$total_runs" -gt 0 ]]; then
+  aggregate characteristic
+else
+  echo "  (no runs)"
+fi
+echo ""
+
+echo "== Suggestions =="
+echo "  NOTE: Codex-side outcomes are NOT captured here. These are Claude-side"
+echo "  performance signals for human review only. Do NOT auto-propose moving"
+echo "  work TO Codex from this report."
+if [[ "$schema_ok" != "true" ]]; then
+  echo "  (advisory-only: schema gate failed — no concrete suggestions emitted)"
+elif [[ "$total_runs" -eq 0 ]]; then
+  echo "  (no runs to evaluate)"
+else
+  model_sugg="$(suggestions_for model model)"
+  char_sugg="$(suggestions_for characteristic characteristic)"
+  if [[ -z "$model_sugg" && -z "$char_sugg" ]]; then
+    echo "  (no cells with n>=$min_samples and a low pass-rate — nothing flagged)"
+  else
+    if [[ -n "$model_sugg" ]]; then echo "$model_sugg"; fi
+    if [[ -n "$char_sugg" ]]; then echo "$char_sugg"; fi
+  fi
+fi
+
+# Successful analysis always exits 0. The report itself is the product; a
+# clean run never signals failure via exit status (a trailing conditional
+# above must not become the script's exit code).
+exit 0

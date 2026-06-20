@@ -12,12 +12,13 @@ A repo is a good candidate when most of these are true:
 - The backlog includes a mix of task types: some bounded implementation, some requiring reasoning, visual judgment, browser verification, or external tool access
 - The team is willing to route tasks explicitly, whether by task-characteristic analysis or label matching
 - Alternatively: the team wants to run Claude-only workers against Linear issues without Codex
+- Alternatively: the team has only Claude Code/Codex + GitHub and wants the worker→release-manager flow with no Linear/Symphony — see GitHub-only mode (`docs/github-only-quickstart.md` in the repo root)
 
 ## Red flags
 
 Do not recommend multi-model dispatch yet when:
 
-- the repo does not use Linear and has no intention to
+- the repo does not use Linear and has no intention to — this is only a red flag for **full Symphony + Linear dispatch**. It is **not** a red flag for GitHub-only mode (`docs/github-only-quickstart.md` in the repo root), which runs the worker→release-manager flow with no tracker (PR + `release:*` labels are the control plane). Offer that path instead of stopping.
 - the repo does not have stable issue bodies, acceptance criteria, or validation commands
 - the team is trying to use multiple models as a substitute for ticket-shaping discipline
 - the main problem is actually poor Symphony onboarding, not missing model capability
@@ -28,10 +29,18 @@ Do not recommend multi-model dispatch yet when:
 At adoption time, the environment should support:
 
 - Claude Code access
-- Linear access
+- Linear access *(full mode)*
 - a browser automation path, preferably Playwright
 - a place to store repo-local orchestration policy such as `.orchestration/claude-lane.yaml`
-- a base Symphony workflow that already has workspace bootstrap assertions and a no-progress stop-loss
+- a base Symphony workflow that already has workspace bootstrap assertions and a no-progress stop-loss *(full mode)*
+
+**GitHub-only mode** (no Linear/Symphony) needs only:
+
+- Claude Code and/or Codex access
+- the `gh` CLI authenticated (`gh auth status`)
+- a GitHub repo where you can create the `release:*` labels (the handoff state machine)
+
+See `docs/github-only-quickstart.md` in the repo root.
 
 ## Preflight checks
 

@@ -55,7 +55,7 @@ If your team prefers API-priced or fully headless execution, keep the same routi
 
 ## Prerequisites
 
-Before installing, make sure you have:
+**Full mode (Symphony + Linear)** — make sure you have:
 
 - An **existing Symphony + Linear workflow** (see [symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter) if you need to set one up)
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** and/or **[Codex](https://openai.com/index/codex/)** installed
@@ -63,6 +63,15 @@ Before installing, make sure you have:
 - **[Playwright](https://playwright.dev/)** or equivalent browser automation for visual verification (recommended)
 - A target git repo with orchestration configured
 - On the dispatcher host: **`tmux`**, `jq`, `git`, `curl`, `python3` (run `bin/claude-doctor` after install to verify)
+
+**GitHub-only mode (minimum)** — for the worker→release-manager flow with no tracker:
+
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** and/or **[Codex](https://openai.com/index/codex/)** installed
+- the **`gh` CLI** authenticated (`gh auth status`)
+- a GitHub repo where you can create labels (for the `release:*` handoff state machine)
+- `tmux`, `jq`, `git` on the dispatcher host
+
+No Linear or Symphony required for GitHub-only mode — see [`docs/github-only-quickstart.md`](docs/github-only-quickstart.md). Use `bin/release-manager-doctor` (not `bin/claude-doctor`) as the GitHub-only preflight.
 
 ## Install
 
@@ -205,19 +214,23 @@ Those decisions belong in the adopter repo, not in this shared skill.
 | `bin/claude-doctor` | Preflight battery — verify env, deps, Linear connectivity, lane state |
 | `bin/claude-version` | Print install root, branch/commit, default model env, and `claude` CLI version |
 | `bin/claude-tmux-finalize` | Worker-invoked helper that writes the completion sentinel JSON |
-| `bin/release-manager` | Local release lane runner for `release:ready` PRs; dry-run by default, explicit `--apply` for GitHub/Linear mutation |
-| `bin/release-manager-doctor` | Preflight battery for GitHub CLI auth, Linear reachability, repo remotes, and release-manager locks |
+| `bin/release-manager` | Single-owner release lane for `release:ready` PRs — serialize merge-to-main, closed-loop rebase recovery (`--on-conflict redispatch`), decoupled deploy-evidence (`--reconcile-deploys`), and per-PR JSONL metrics; dry-run by default, explicit `--apply` to mutate |
+| `bin/release-manager-doctor` | Preflight battery for GitHub CLI auth, Merge Queue config, Linear reachability, repo remotes, release-manager env, and stale locks |
+| `bin/release-status` | Read-only snapshot of `release:ready`/`queued`/`merged`/`failed` PR counts and time-to-main (p50/p90) from the metrics log; never mutates |
+| `bin/routing-feedback` | Read-only analyzer of worker outcomes (model, pass-rate, latency) that proposes routing-profile edits for human review; never writes |
 | `env.sh` | Source to set lane defaults (paths, model, routing label, MCP config, env allowlist) |
 | `mcp/worker-mcp.json` | Default MCP config (Linear only) |
 | `mcp/worker-mcp-runpod.json` | Opt-in MCP config (Linear + RunPod) |
 | `settings/claude-settings.tmux.json` | Per-worktree `.claude/settings.json` with `bypassPermissions` |
-| `tests/` | Four fully-isolated regression tests (sentinel-malformed, MCP opt-in, env isolation, release-manager fake-`gh`) |
+| `tests/` | Eight fully-isolated regression tests (sentinel-malformed, MCP opt-in, env isolation, release-manager, release-status, routing-feedback, release-manager-doctor, launcher-recovery) |
 | `docs/architecture.md` | Sentinel JSON contract, dispatch lock semantics, autoset-marker pattern |
 | `docs/backend-options.md` | How to choose tmux, `claude -p`, or a hybrid backend intentionally |
 | `docs/lessons.md` | Bug-by-bug postmortems from the tmux backend build |
 | `docs/linear-setup.md` | How to set up `lane:claude` + `model:*` labels in a Linear workspace |
 | `docs/migration-v2-to-v3.md` | What changes if you adopted v2.0.1 |
-| `docs/release-manager-lane.md` | Worker/release-manager split for high-volume PR queueing, merge, deploy, and Linear closeout |
+| `docs/github-only-quickstart.md` | Run the worker→release-manager flow with only Claude Code/Codex + GitHub (no Linear/Symphony) |
+| `docs/release-manager-lane.md` | Worker/release-manager split for high-volume PR queueing, merge, conflict recovery, deploy, metrics, and Linear closeout |
+| `docs/conflict-aware-dispatch.md` | Design/roadmap: prevent merge conflicts at dispatch time via predicted file-overlap staggering |
 | `llms.txt` | Agent-oriented summary of the repo |
 
 ## Design defaults
@@ -295,7 +308,15 @@ Use Linear labels, projects, or assignee filters to route issues to Claude, then
 
 ### Can I use this without Codex?
 
-Yes. In Claude-only mode, Linear is still the control plane and this skill still gives you routing profiles, closeout rules, prompt safety, visual verification guidance, and cleanup policy. Symphony/Codex becomes optional instead of required.
+Yes. In Claude-only mode, the control plane stays the same (Linear in full mode, or PR + `release:*` labels in [GitHub-only mode](docs/github-only-quickstart.md)), and this skill still gives you routing profiles, closeout rules, prompt safety, visual verification guidance, and cleanup policy. Symphony/Codex becomes optional instead of required.
+
+### Can I use this without Linear or Symphony?
+
+Yes — GitHub-only mode is a first-class supported path, and it scales up to Linear/Symphony without changing the worker contract. See [`docs/github-only-quickstart.md`](docs/github-only-quickstart.md) for the full walkthrough.
+
+The storm fix is the producer/consumer split, and it works on **any** repo (personal or org): workers open a PR, get CI green, add the GitHub label `release:ready`, and **stop** — one `bin/release-manager --no-linear` process is the only writer to `main`. Fifteen agents can't collide when only one writer exists.
+
+[GitHub Merge Queue](docs/github-only-quickstart.md) is only the *latency* fix (batched speculative CI) and is available **only on organization-owned repos** — personal repos can't use it. On a personal repo, `--strategy squash` gives serialized one-at-a-time merges with no setup. The GitHub-only preflight is `bin/release-manager-doctor` (not `bin/claude-doctor`, which needs Linear).
 
 ### Why use Linear as the control plane?
 

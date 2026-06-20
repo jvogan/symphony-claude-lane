@@ -21,6 +21,7 @@ For high-volume deploys, keep release separate from worker execution. Claude and
 - **Task-Characteristic Routing**: The orchestrator analyzes each issue and picks the best model based on what the task requires. Labels serve as overrides.
 - **Label-Only Routing**: Alternative strategy where routing is determined entirely by Linear labels. Simpler but less adaptive.
 - **Claude-Only Mode**: For teams without Codex. All tasks route to Claude. The dispatch contract still applies.
+- **GitHub-Only Mode**: For adopters with only Claude Code/Codex + GitHub (no Linear, no Symphony). PR + `release:*` labels are the control plane: workers add `release:ready` and stop; one `bin/release-manager --no-linear` process is the only writer to `main`, which fixes the rebase storm on any repo. GitHub Merge Queue (the latency fix) is org-only; personal repos use `--strategy squash` for serialized merges. Scales up to Linear/Symphony without changing the worker contract. See docs/github-only-quickstart.md.
 - **Routing Profile**: A repo-local YAML file (`.orchestration/claude-lane.yaml`) that records model selection criteria, label overrides, privacy rules, guardrails, and cleanup policy.
 - **Visual Verification**: Playwright-first browser verification for tickets affecting rendered output.
 - **Fail-Closed Worker Launch**: Claude launchers should require an explicit Claude route, pass only an allowlisted environment, render an explicit closeout state, and keep dry-runs free of worktree/run artifacts.
@@ -29,6 +30,9 @@ For high-volume deploys, keep release separate from worker execution. Claude and
 - **MCP Defense-in-Depth**: The RunPod MCP and its `RUNPOD_API_KEY` env var are jointly opt-in via `CLAUDE_WORKER_ENABLE_RUNPOD=true`. A worker cannot bypass the MCP gate by calling RunPod via raw `curl` because the credentials are also withheld.
 - **Outcome Parser Compatibility**: New workers emit `symphony-outcome`; audit tools may support legacy `symphony:outcome verdict=pass` comments while refusing current failed or blocked outcomes.
 - **Release Manager Lane**: A local dry-run-first runner (`bin/release-manager`) consumes `release:ready` PRs, serializes merge-to-main through GitHub merge queue or one immediate strategy, optionally waits for deploy workflow evidence, and posts `release-manager-outcome` closeout to Linear. Workers must not merge, rebase, push to `main`, or trigger production when told "deploy."
+- **Closed-Loop Conflict Recovery**: On a merge conflict (`mergeStateStatus=DIRTY`), `bin/release-manager --on-conflict redispatch` re-triggers the producing worker to rebase its own branch and re-mark `release:ready` — bounded by a max-attempts cap, fail-closed (never redispatches when Linear is unavailable, so the loop cannot run unbounded), and the worker still never touches `main`. This is what lets high-volume parallel merging proceed without agents getting blocked on rebase storms.
+- **Release Metrics & Status**: `bin/release-manager` appends one JSONL record per processed PR (apply-mode only) with time-to-main; `bin/release-status` reads it for queue counts and p50/p90 time-to-main. `--reconcile-deploys` attaches deploy evidence decoupled from the throughput merge loop.
+- **Routing Feedback**: `bin/routing-feedback` aggregates worker outcomes by model/characteristic (pass-rate, latency, fail reasons) from the local `meta.env` corpus and proposes routing-profile edits for human review — never auto-applies.
 
 ## When to prefer Claude
 
@@ -65,25 +69,31 @@ Inspect repo -> confirm multi-model candidate -> confirm base workflow has guard
 - `skills/symphony-claude-lane/references/examples.md` — concrete routing examples across task types
 - `skills/symphony-claude-lane/assets/claude-lane-profile.example.yaml` — example routing profile with model selection criteria
 - `skills/symphony-claude-lane/assets/claude-lane-guidance.snippet.md` — starter guidance for adopter repo orchestration docs
-- `skills/symphony-claude-lane/assets/claude-worker.reference.sh` — reference launcher script (adapt to your environment)
+- `skills/symphony-claude-lane/assets/claude-worker.reference.sh` — reference launcher script (adapt to your environment); also supports a `--no-linear` GitHub-only mode that takes its task from `--github-issue N` or `--task-file PATH` and closes out via PR + `release:ready`
 - `skills/symphony-claude-lane/assets/review-audit.reference.py` — reference parser for current and legacy outcome comments
 - `skills/symphony-claude-lane/assets/worker-prompt.template.md` — worker prompt template with trust boundary, capabilities, and closeout protocol
+- `skills/symphony-claude-lane/assets/worker-prompt.github.template.md` — GitHub-only worker prompt: PR + `release:ready` closeout, no Linear
 - `skills/symphony-claude-lane/assets/linear-outcome-block.example.md` — example structured closeout comments
 - `bin/claude-doctor` — preflight battery (env vars, deps, Linear connectivity, dispatch-lock state)
 - `bin/claude-version` — print install root/commit and worker model defaults
 - `bin/claude-tmux-finalize` — worker-invoked helper that writes the completion sentinel JSON
 - `bin/release-manager` — dry-run-first release lane for `release:ready` PRs; `--apply` is required for GitHub/Linear mutation
-- `bin/release-manager-doctor` — release lane preflight for GitHub CLI auth, Linear reachability, repo remotes, and stale locks
+- `bin/release-manager-doctor` — release lane preflight for GitHub CLI auth, Merge Queue config, Linear reachability, repo remotes, release-manager env, and stale locks
+- `bin/release-status` — read-only counts of release:ready/queued/merged/failed PRs and time-to-main p50/p90 (no mutation)
+- `bin/routing-feedback` — read-only analyzer of worker outcomes (model, pass-rate, latency) that proposes routing-profile edits for human review
 - `env.sh` — source to set lane defaults (paths, model, routing label, MCP config, env allowlist) with autoset-marker idempotency
 - `mcp/worker-mcp.json` — default MCP config (Linear only)
+- `mcp/worker-mcp-github.json` — Linear-free MCP config for `--no-linear` GitHub-only workers
 - `mcp/worker-mcp-runpod.json` — opt-in MCP config (Linear + RunPod, jointly gated with the RunPod env-var allowlist)
 - `settings/claude-settings.tmux.json` — per-worktree `.claude/settings.json` with bypassPermissions
-- `tests/` — fully-isolated regression tests (sentinel-malformed JSON validation, MCP opt-in branches, release-manager fake-`gh`)
+- `tests/` — fully-isolated regression tests (sentinel-malformed, MCP opt-in, env isolation, release-manager, release-status, routing-feedback, release-manager-doctor merge-queue, launcher rebase-recovery render)
 - `docs/architecture.md` — sentinel JSON contract, dispatch lock TOCTOU mitigation, autoset-marker pattern, MCP defense-in-depth
 - `docs/lessons.md` — bug-by-bug postmortems from the tmux backend build
 - `docs/linear-setup.md` — how to set up `lane:claude` + `model:*` labels in a Linear workspace
 - `docs/migration-v2-to-v3.md` — what changes if you adopted v2.0.1
-- `docs/release-manager-lane.md` — worker/release-manager split for high-volume PR queueing, merge, deploy, and Linear closeout
+- `docs/github-only-quickstart.md` — run the worker→release-manager flow with only Claude Code/Codex + GitHub (no Linear/Symphony)
+- `docs/release-manager-lane.md` — worker/release-manager split for high-volume PR queueing, merge, conflict recovery, deploy, metrics, and Linear closeout
+- `docs/conflict-aware-dispatch.md` — design/roadmap for preventing merge conflicts at dispatch time via predicted file-overlap staggering
 
 ## Install
 
@@ -95,7 +105,7 @@ Or copy `skills/symphony-claude-lane/` into your Codex skills directory or refer
 
 ## Prerequisites
 
-Requires an existing Symphony + Linear workflow. See [symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter) to set one up.
+Full mode requires an existing Symphony + Linear workflow. See [symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter) to set one up. A **GitHub-only mode** (no Linear, no Symphony) is also supported: the producer/consumer split — workers add the GitHub label `release:ready` and stop, while one `bin/release-manager --no-linear` process is the only writer to `main` — fixes the rebase storm on any repo (personal or org), needing only Claude Code/Codex + an authenticated `gh` CLI. See docs/github-only-quickstart.md.
 
 ## License
 

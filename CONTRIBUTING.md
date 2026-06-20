@@ -24,9 +24,18 @@ bash -n \
   bin/claude-doctor \
   bin/claude-version \
   bin/claude-tmux-finalize \
+  bin/release-manager \
+  bin/release-manager-doctor \
+  bin/release-status \
+  bin/routing-feedback \
   tests/test_mcp_runpod_optin.sh \
   tests/test_tmux_sentinel_malformed.sh \
   tests/test_env_isolation.sh \
+  tests/test_release_manager.sh \
+  tests/test_release_status.sh \
+  tests/test_routing_feedback.sh \
+  tests/test_release_manager_doctor.sh \
+  tests/test_launcher_recovery.sh \
   skills/symphony-claude-lane/assets/claude-worker.reference.sh
 
 find . -path './.git' -prune -o \( -name '*.json' -o -name 'marketplace.json' \) -type f -print \
@@ -36,6 +45,11 @@ find . -path './.git' -prune -o \( -name '*.json' -o -name 'marketplace.json' \)
 bash tests/test_tmux_sentinel_malformed.sh
 bash tests/test_mcp_runpod_optin.sh
 bash tests/test_env_isolation.sh
+bash tests/test_release_manager.sh
+bash tests/test_release_status.sh
+bash tests/test_routing_feedback.sh
+bash tests/test_release_manager_doctor.sh
+bash tests/test_launcher_recovery.sh
 ```
 
 ## Security Hygiene

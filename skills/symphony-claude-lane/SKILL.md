@@ -18,8 +18,9 @@ This skill also works for teams that want to run **Claude-only** workers without
 - The target repo has a place for durable orchestration guidance such as `AGENTS.md` or `.orchestration/`.
 - At least one of Claude Code or Codex can be run as a worker against the repo.
 - Browser verification can be done with Playwright or an equivalent automation path (recommended but not required).
+- **GitHub-only mode (no Linear/Symphony) is supported.** An adopter with only Claude Code/Codex + an authenticated `gh` CLI and a GitHub repo where they can create `release:*` labels can run the worker→release-manager flow without a tracker. Read `../../docs/github-only-quickstart.md` and skip the Linear-specific steps below (PR + `release:*` labels are the control plane).
 
-If those conditions are not true, explain the gap and stop or redirect to a more appropriate setup skill.
+If those conditions are not true, explain the gap and stop or redirect to a more appropriate setup skill — **except** when the only missing piece is Linear/Symphony: in that case offer GitHub-only mode (`../../docs/github-only-quickstart.md`) instead of stopping.
 
 ## Required workflow
 
@@ -64,6 +65,7 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Read `references/worker-launch.md` when helping the adopter set up the Claude worker launcher, MCP config, or security practices.
 - Read `../../docs/backend-options.md` when the adopter asks about tmux versus `claude -p`, API pricing, or a hybrid backend.
 - Read `../../docs/release-manager-lane.md` when the adopter asks about autonomous deploys, high-volume PR merging, "deploy" commands, merge queues, or avoiding parallel workers fighting over `main`.
+- Read `../../docs/github-only-quickstart.md` when the adopter has only Claude Code/Codex + GitHub and no Linear/Symphony — the worker→release-manager flow runs in `--no-linear` mode with PR + `release:*` labels as the control plane.
 - Read `references/visual-verification.md` before writing browser-verification policy.
 - Read `references/closeout.md` when defining `In Review`, outcome blocks, retry behavior, or self-close rules.
 - Read `references/troubleshooting.md` when a worker stalls, exhausts turns, or drifts from the routing contract.

@@ -16,6 +16,8 @@ The trade-off: there is no exit code. Completion signaling moves to the sentinel
 
 The launch pattern is the same whether you run mixed-model (Claude + Codex) or Claude-only.
 
+**GitHub-only mode (no Linear):** a worker can take its task from a GitHub issue (`gh issue view`) or a task file instead of Linear, and close out by opening a PR + adding `release:ready` (instead of moving a Linear issue). The worktree isolation, env allowlist, prompt trust boundary, and completion sentinel mechanics described below are **identical** — only the task source and closeout target change. The reference launcher exposes this via `--no-linear --github-issue N | --task-file PATH`. See `docs/github-only-quickstart.md` in the repo root.
+
 If an adopter explicitly wants API-priced, headless `claude -p` execution instead, treat that as a different backend. Keep the routing, prompt safety, outcome, closeout, and cleanup contracts, but adapt launch, status, and completion parsing deliberately; see `docs/backend-options.md` in the repo root.
 
 ## Launch sequence
@@ -27,6 +29,8 @@ Query Linear's GraphQL API for the issue's title, description, state, project, l
 ```
 POST https://api.linear.app/graphql
 ```
+
+**GitHub-only mode:** instead of Linear, fetch the task from a GitHub issue (`gh issue view N --json title,body,labels`) or read it from a task file (`--task-file PATH`). The remaining steps (worktree, prompt render, env allowlist, sentinel, teardown) are unchanged; closeout is "open PR + add `release:ready`" rather than a Linear state move. See `docs/github-only-quickstart.md` in the repo root.
 
 **Security:** Write the `Authorization: $LINEAR_API_KEY` header (bare, **not** `Bearer …` — Linear personal API keys use the bare form; OAuth access tokens and the Linear MCP HTTP transport use `Bearer`) to a temp file and pass it via `curl -H @file`. Delete the temp file immediately after the request. This prevents the API key from appearing in the process argument list (`ps aux`).
 

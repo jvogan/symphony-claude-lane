@@ -116,6 +116,18 @@ export RELEASE_MANAGER_WAIT_SECONDS="${RELEASE_MANAGER_WAIT_SECONDS:-1800}"
 export RELEASE_MANAGER_LINEAR_DONE_STATE="${RELEASE_MANAGER_LINEAR_DONE_STATE:-Done}"
 export RELEASE_MANAGER_LINEAR_FAILURE_STATE="${RELEASE_MANAGER_LINEAR_FAILURE_STATE:-Todo}"
 
+# Closed-loop conflict recovery + metrics. When a release:ready PR is DIRTY
+# (merge conflict) the lane can redispatch it back through the worker lane
+# instead of merely skipping it. release-manager is the SIGNAL PRODUCER; the
+# launcher (--rebase-recovery) is the CONSUMER. These names are a cross-tool
+# contract — keep them in sync with the launcher. Fail-closed: redispatch only
+# fires when Linear is usable (retry count must be knowable).
+export RELEASE_MANAGER_ON_CONFLICT="${RELEASE_MANAGER_ON_CONFLICT:-fail}"
+export RELEASE_MANAGER_REBASE_PR_LABEL="${RELEASE_MANAGER_REBASE_PR_LABEL:-release:rebase}"
+export RELEASE_MANAGER_REBASE_STATE="${RELEASE_MANAGER_REBASE_STATE:-Todo}"
+export RELEASE_MANAGER_MAX_REBASE_ATTEMPTS="${RELEASE_MANAGER_MAX_REBASE_ATTEMPTS:-2}"
+export RELEASE_MANAGER_METRICS_FILE="${RELEASE_MANAGER_METRICS_FILE:-$CLAUDE_RUNS_ROOT/release-metrics.jsonl}"
+
 # ---------- RunPod-conditional selectors (re-evaluated each source) ----------
 # These two values depend on CLAUDE_WORKER_ENABLE_RUNPOD. They re-evaluate on
 # every source so an operator can:
@@ -133,7 +145,10 @@ _symphony_compute_mcp_config() {
 }
 
 _symphony_compute_allowlist() {
-  local base="HOME PATH SHELL TMPDIR USER LOGNAME LANG LC_ALL LC_CTYPE SSH_AUTH_SOCK LINEAR_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR XDG_CONFIG_HOME XDG_CACHE_HOME PLAYWRIGHT_BROWSERS_PATH"
+  # GH_TOKEN/GITHUB_TOKEN let a worker authenticate the gh CLI (required for the
+  # GitHub-only --no-linear lane; harmless when unset). Kept in sync with the
+  # reference launcher's default allowlist.
+  local base="HOME PATH SHELL TMPDIR USER LOGNAME LANG LC_ALL LC_CTYPE SSH_AUTH_SOCK LINEAR_API_KEY GH_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR XDG_CONFIG_HOME XDG_CACHE_HOME PLAYWRIGHT_BROWSERS_PATH"
   if [[ "${CLAUDE_WORKER_ENABLE_RUNPOD:-false}" == "true" ]]; then
     base="$base RUNPOD_API_KEY RUNPOD_NETWORK_VOLUME_ID RUNPOD_DATACENTER"
   fi
