@@ -29,9 +29,15 @@ deploy_workflow=""
 linear_updates=true
 allow_no_checks=false
 require_review=false
+reconcile_deploys=false
+on_conflict="${RELEASE_MANAGER_ON_CONFLICT:-fail}"
+rebase_pr_label="${RELEASE_MANAGER_REBASE_PR_LABEL:-release:rebase}"
+rebase_state="${RELEASE_MANAGER_REBASE_STATE:-Todo}"
+max_rebase_attempts="${RELEASE_MANAGER_MAX_REBASE_ATTEMPTS:-2}"
 
 GH_BIN="${RELEASE_MANAGER_GH_BIN:-gh}"
 locks_root="${CLAUDE_RUNS_ROOT:-$SYMPHONY_CLAUDE_ROOT/runs}"
+metrics_file="${RELEASE_MANAGER_METRICS_FILE:-$locks_root/release-metrics.jsonl}"
 LOCKS_ACQUIRED=()
 RELEASE_LOCK_HELD=false
 
@@ -48,6 +54,9 @@ Modes:
   --dry-run                   Plan only; no GitHub/Linear mutations (default).
   --apply                     Queue/merge candidates and optionally update Linear.
   --loop                      Repeat forever, sleeping --interval between passes.
+  --reconcile-deploys         Reconcile merged PRs that lack deploy evidence by
+                              polling --wait-deploy-workflow on the merge SHA.
+                              Requires --wait-deploy-workflow.
 
 Selection:
   --github-repo OWNER/NAME    GitHub repo slug. Defaults from origin remote.
@@ -64,6 +73,17 @@ Merge behavior:
   --wait-seconds N            Timeout for merge/deploy waits (default: $wait_seconds).
   --allow-no-checks           Do not skip PRs with no status checks.
   --require-review            Require reviewDecision=APPROVED.
+
+Conflict recovery:
+  --on-conflict fail|redispatch
+                              fail (default): DIRTY PRs are skipped (no change).
+                              redispatch: label the PR $rebase_pr_label, request a
+                              rebase in Linear, and move the issue to
+                              $rebase_state. Requires --apply and a usable Linear.
+
+Metrics:
+  --metrics-file PATH         JSONL sink, one line per processed PR in apply
+                              mode (default: $metrics_file).
 
 Linear:
   --no-linear                 Do not post Linear comments or move issue state.
@@ -210,23 +230,38 @@ pr_is_ready() {
 }
 
 infer_issue_id() {
-  local text="$1"
-  printf '%s\n' "$text" | perl -ne 'if (/\b([A-Z][A-Z0-9]+-[0-9]+)\b/) { print "$1\n"; exit }'
+  # Match a Linear-style id (TEAM-123) with non-alphanumeric boundaries, without
+  # a perl dependency. Pad with spaces so a leading/trailing id still boundaries.
+  local text=" $1 "
+  if [[ "$text" =~ [^A-Za-z0-9]([A-Z][A-Z0-9]+-[0-9]+)[^A-Za-z0-9] ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+  return 0
 }
 
 linear_graphql() {
-  local q="$1" v="${2:-{}}"
+  # NOTE: do NOT write the default as ${2:-{}} — bash parses the inner `}` as the
+  # end of the expansion and appends a literal `}`, corrupting every payload into
+  # invalid JSON. Default to an empty variables object explicitly instead.
+  local q="$1" v="${2:-}"
+  [[ -n "$v" ]] || v='{}'
   [[ -n "${LINEAR_API_KEY:-}" ]] || return 1
-  local header payload
+  local header payload body rc
   header="$(mktemp)"
   payload="$(jq -nc --arg q "$q" --argjson v "$v" '{query:$q,variables:$v}')"
   printf 'Authorization: %s' "$LINEAR_API_KEY" > "$header"
   set +e
-  curl -sf "$GRAPHQL_URL" -H @"$header" -H "Content-Type: application/json" --data "$payload"
-  local rc=$?
+  body="$(curl -sf "$GRAPHQL_URL" -H @"$header" -H "Content-Type: application/json" --data "$payload")"
+  rc=$?
   set -e
   rm -f "$header"
-  return "$rc"
+  (( rc == 0 )) || return "$rc"
+  # Linear returns HTTP 200 even on GraphQL errors, so `curl -sf` cannot catch
+  # them. Treat a response carrying top-level `errors` or missing `data` as a
+  # failure so callers (esp. the rebase retry counter) fail closed rather than
+  # silently reading an error body as an empty/zero result.
+  jq -e '.data != null and (has("errors") | not)' >/dev/null 2>&1 <<<"$body" || return 1
+  printf '%s' "$body"
 }
 
 linear_issue_uuid() {
@@ -263,6 +298,40 @@ linear_move_issue() {
     "$(jq -nc --arg id "$issue_uuid" --arg stateId "$state_id" '{id:$id,stateId:$stateId}')" >/dev/null
 }
 
+# Emit each comment body for an issue (newline-joined) so callers can scan for
+# evidence markers. Returns non-zero (emitting nothing) if the underlying Linear
+# query fails, so callers can fail closed instead of reading a fetch error as
+# "no comments".
+linear_list_comments() {
+  local issue_uuid="$1" body rc
+  set +e
+  body="$(linear_graphql \
+    'query($id:String!){issue(id:$id){comments(first:250){nodes{body}}}}' \
+    "$(jq -nc --arg id "$issue_uuid" '{id:$id}')")"
+  rc=$?
+  set -e
+  (( rc == 0 )) || return "$rc"
+  printf '%s' "$body" | jq -r '.data.issue.comments.nodes[]?.body // empty'
+}
+
+# Count DISTINCT release-manager-authored rebase-request comments (must carry
+# BOTH the marker AND the managed_by line), so the retry counter cannot be
+# inflated by incidental newlines in one body or by third-party comment text.
+# Prints the count on success; returns non-zero (emitting nothing) if the Linear
+# query fails, so the caller fails closed rather than treating an unreadable
+# history as zero attempts.
+count_rebase_markers() {
+  local issue_uuid="$1" body rc
+  set +e
+  body="$(linear_graphql \
+    'query($id:String!){issue(id:$id){comments(first:250){nodes{body}}}}' \
+    "$(jq -nc --arg id "$issue_uuid" '{id:$id}')")"
+  rc=$?
+  set -e
+  (( rc == 0 )) || return "$rc"
+  printf '%s' "$body" | jq '[.data.issue.comments.nodes[]? | select((.body | contains("<!-- release-manager-rebase -->")) and (.body | contains("managed_by: release-manager")))] | length'
+}
+
 post_linear_evidence() {
   "$linear_updates" || return 0
   [[ -n "${LINEAR_API_KEY:-}" ]] || { log "Linear skipped: LINEAR_API_KEY unset"; return 0; }
@@ -296,6 +365,78 @@ managed_by: release-manager
 label_transition() {
   local pr="$1" add="$2" remove="$3"
   "$GH_BIN" pr edit "$pr" -R "$github_repo" --remove-label "$remove" --add-label "$add" >/dev/null 2>&1 || true
+}
+
+# Closed-loop conflict recovery (apply mode only). Called for a DIRTY PR when
+# on_conflict==redispatch AND Linear is usable. Emits the redispatch SIGNAL the
+# launcher --rebase-recovery mode consumes. Echoes the conclusion the caller
+# records in metrics: rebase_requested (signal sent) or rebase_exhausted (retry
+# budget spent). Best-effort: never aborts the batch. Callers must have already
+# verified mode==apply, linear_updates==true, and LINEAR_API_KEY is set.
+handle_conflict() {
+  local pr="$1" pr_url="$2" title="$3" head="$4" issue_id issue_uuid count attempt state_id rc
+  # Conclusion is returned via the global CONFLICT_CONCLUSION (NOT stdout) so the
+  # log() diagnostics below stay visible to the operator instead of being
+  # swallowed by a command-substitution capture. Defaults to skip.
+  CONFLICT_CONCLUSION="skip"
+
+  issue_id="$(infer_issue_id "$head $title")"
+  if [[ -z "$issue_id" ]]; then
+    log "conflict: PR #$pr DIRTY but no issue id found; not redispatching"
+    return 0
+  fi
+  issue_uuid="$(linear_issue_uuid "$issue_id" 2>/dev/null || true)"
+  if [[ -z "$issue_uuid" ]]; then
+    log "conflict: $issue_id not found in Linear; not redispatching"
+    return 0
+  fi
+
+  # The retry counter MUST come from Linear server state. If the history is
+  # unreadable (network error, GraphQL error, rate limit) the count is
+  # unknowable, so fail closed (skip) — NEVER treat it as zero and redispatch,
+  # which would defeat the anti-infinite-loop guard.
+  set +e
+  count="$(count_rebase_markers "$issue_uuid")"
+  rc=$?
+  set -e
+  if (( rc != 0 )) || ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    log "conflict: $issue_id rebase history unavailable (retry count unknowable); not redispatching"
+    return 0
+  fi
+  attempt=$((count + 1))
+
+  if (( count >= max_rebase_attempts )); then
+    log "conflict: $issue_id rebase budget exhausted (attempts=$count, max=$max_rebase_attempts); failing PR #$pr"
+    label_transition "$pr" "$failed_label" "$ready_label"
+    post_linear_evidence "$pr" "$pr_url" "failed" "rebase_loop_exhausted attempts=$count" "$title" "$head"
+    CONFLICT_CONCLUSION="rebase_exhausted"
+    return 0
+  fi
+
+  # Write the retry marker FIRST — it is the durable counter. Only consume the
+  # attempt (flip the PR label, move the issue) once the marker is recorded, so
+  # a failed marker write can never let the loop run without an incrementing
+  # bound (which would re-enable unbounded ping-pong).
+  if ! linear_comment "$issue_uuid" "<!-- release-manager-rebase -->
+status: rebase_requested
+pr: $pr_url
+base: $base_branch
+attempt: $attempt
+detail: merge_state=DIRTY
+managed_by: release-manager
+"; then
+    log "conflict: rebase marker write failed for $issue_id; not redispatching this pass"
+    return 0
+  fi
+
+  log "conflict: redispatching PR #$pr ($issue_id) for rebase (attempt $attempt)"
+  # GitHub: de-dup from the consume set (add rebase label, drop ready label).
+  label_transition "$pr" "$rebase_pr_label" "$ready_label"
+  # Linear: move the issue into the rebase pickup state.
+  state_id="$(linear_state_id "$issue_id" "$rebase_state" 2>/dev/null || true)"
+  linear_move_issue "$issue_uuid" "$state_id" 2>/dev/null || log "conflict: state move to $rebase_state failed for $issue_id"
+  CONFLICT_CONCLUSION="rebase_requested"
+  return 0
 }
 
 merge_pr() {
@@ -344,11 +485,43 @@ wait_for_deploy_workflow() {
   return 1
 }
 
+# Single metrics chokepoint: one JSONL line per processed PR, apply mode only
+# (apply also covers --reconcile-deploys). Never writes in dry-run. Epoch fields
+# are nullable; build with jq only. metrics_file is safe_meta_value-validated.
+write_metrics() {
+  [[ "$mode" == "apply" ]] || return 0
+  local number="$1" url="$2" head="$3" base="$4" conclusion="$5" \
+        ready_observed="$6" queued="$7" merged="$8"
+  local ttm="null"
+  if [[ "$conclusion" == "merged" || "$conclusion" == "deployed" ]] && \
+     [[ "$merged" != "null" && "$ready_observed" != "null" ]]; then
+    ttm=$((merged - ready_observed))
+  fi
+  mkdir -p "$(dirname "$metrics_file")" 2>/dev/null || true
+  jq -nc \
+    --argjson ts "$(date +%s)" \
+    --arg repo "$github_repo" \
+    --argjson number "$number" \
+    --arg url "$url" \
+    --arg head "$head" \
+    --arg base "$base" \
+    --arg strategy "$strategy" \
+    --arg mode "$mode" \
+    --arg conclusion "$conclusion" \
+    --argjson ready_observed "$ready_observed" \
+    --argjson queued "$queued" \
+    --argjson merged "$merged" \
+    --argjson time_to_main_s "$ttm" \
+    '{ts:$ts,repo:$repo,number:$number,url:$url,head:$head,base:$base,strategy:$strategy,mode:$mode,conclusion:$conclusion,ready_observed:$ready_observed,queued:$queued,merged:$merged,time_to_main_s:$time_to_main_s}' \
+    >> "$metrics_file" 2>/dev/null || log "metrics write failed for #$number"
+}
+
 process_once() {
   acquire_lock
   log "repo=$github_repo base=$base_branch label=$ready_label mode=$mode strategy=$strategy max=$max_per_run"
 
   local candidates count pr_json pr ready_rc reason title url head processed merge_sha deploy_url
+  local conclusion ready_observed queued_at merged_at_epoch conflict_conclusion
   candidates="$(list_candidates)"
   count="$(jq 'length' <<<"$candidates")"
   log "found $count candidate PR(s)"
@@ -365,48 +538,174 @@ process_once() {
     ready_rc=$?
     set -e
     if [[ "$ready_rc" -ne 0 ]]; then
+      # Closed-loop conflict recovery: a DIRTY (merge conflict) PR can be
+      # redispatched instead of merely skipped. Fail-closed — only when
+      # redispatch is requested, we are applying, AND Linear is usable so the
+      # retry counter is knowable (the primary anti-infinite-loop guard). Any
+      # other skip reason (DRAFT/BLOCKED/checks/review) falls through unchanged.
+      if [[ "$reason" == "merge_state=DIRTY" && "$on_conflict" == "redispatch" && "$mode" == "apply" ]]; then
+        if "$linear_updates" && [[ -n "${LINEAR_API_KEY:-}" ]]; then
+          echo "  CONFLICT #$pr  $reason  $title"
+          handle_conflict "$pr" "$url" "$title" "$head"
+          conflict_conclusion="$CONFLICT_CONCLUSION"
+          if [[ "$conflict_conclusion" == "rebase_requested" || "$conflict_conclusion" == "rebase_exhausted" ]]; then
+            ready_observed="$(date +%s)"
+            write_metrics "$pr" "$url" "$head" "$base_branch" "$conflict_conclusion" "$ready_observed" "null" "null"
+          fi
+          continue
+        fi
+        log "conflict: PR #$pr DIRTY and --on-conflict redispatch, but Linear unusable; skipping (retry count unknowable)"
+      fi
       echo "  SKIP  #$pr  $reason  $title"
       continue
     fi
     echo "  READY #$pr  $head  $title"
+    ready_observed="$(date +%s)"
     processed=$((processed + 1))
+    conclusion=""
+    queued_at="null"
+    merged_at_epoch="null"
     if [[ "$mode" != "apply" ]]; then
       echo "        dry-run: would queue/merge $url"
     else
       label_transition "$pr" "$queued_label" "$ready_label"
+      queued_at="$(date +%s)"
       if merge_pr "$pr"; then
         merge_sha=""
         if "$wait_merge" || [[ -n "$deploy_workflow" ]]; then
           merge_sha="$(wait_for_merge "$pr" || true)"
         fi
+        [[ -n "$merge_sha" ]] && merged_at_epoch="$(date +%s)"
         detail="merge requested via strategy=$strategy"
         [[ -n "$merge_sha" ]] && detail="$detail merge_sha=$merge_sha"
         if [[ -n "$deploy_workflow" ]]; then
           if [[ -z "$merge_sha" ]]; then
+            conclusion="failed"
             label_transition "$pr" "$failed_label" "$queued_label"
             post_linear_evidence "$pr" "$url" "failed" "$detail merge_wait_timeout=true deploy_workflow=$deploy_workflow" "$title" "$head"
           elif deploy_url="$(wait_for_deploy_workflow "$deploy_workflow" "$merge_sha" 2>/dev/null)"; then
+            conclusion="deployed"
             label_transition "$pr" "$merged_label" "$queued_label"
             post_linear_evidence "$pr" "$url" "deployed" "$detail deploy=$deploy_url" "$title" "$head"
           else
+            conclusion="failed"
             label_transition "$pr" "$failed_label" "$queued_label"
             post_linear_evidence "$pr" "$url" "failed" "$detail deploy_workflow_failed=$deploy_workflow" "$title" "$head"
           fi
         elif [[ -n "$merge_sha" ]]; then
+          conclusion="merged"
           label_transition "$pr" "$merged_label" "$queued_label"
           post_linear_evidence "$pr" "$url" "merged" "$detail" "$title" "$head"
         else
+          conclusion="queued"
           post_linear_evidence "$pr" "$url" "queued" "$detail" "$title" "$head"
         fi
       else
+        conclusion="failed"
         label_transition "$pr" "$failed_label" "$queued_label"
         post_linear_evidence "$pr" "$url" "failed" "merge command failed strategy=$strategy" "$title" "$head"
       fi
+      write_metrics "$pr" "$url" "$head" "$base_branch" "$conclusion" "$ready_observed" "$queued_at" "$merged_at_epoch"
     fi
     [[ "$processed" -lt "$max_per_run" ]] || break
   done < <(jq -c '.[]' <<<"$candidates")
 
   log "processed $processed ready PR(s)"
+}
+
+reconcile_query_fields='number,title,url,headRefName,baseRefName,labels,mergeCommit'
+
+# List MERGED PRs still carrying a lane label (queued or merged). These are the
+# PRs whose deploy outcome we may have missed (e.g. the manager exited before
+# the deploy workflow finished). De-duped across both labels by .number.
+list_reconcile_candidates() {
+  local queued merged
+  queued="$("$GH_BIN" pr list -R "$github_repo" --base "$base_branch" --state merged --label "$queued_label" --json "$reconcile_query_fields" 2>/dev/null || echo '[]')"
+  merged="$("$GH_BIN" pr list -R "$github_repo" --base "$base_branch" --state merged --label "$merged_label" --json "$reconcile_query_fields" 2>/dev/null || echo '[]')"
+  jq -cs 'add | unique_by(.number)' <<<"$queued"$'\n'"$merged"
+}
+
+# True when a merged PR still LACKS deploy evidence and is worth reconciling.
+# Linear usable -> evidence is a release-manager comment containing 'deploy='.
+# --no-linear -> evidence is simply carrying the merged_label.
+reconcile_needs_deploy() {
+  local pr_json="$1" head title issue_id issue_uuid has_merged_label
+  if "$linear_updates" && [[ -n "${LINEAR_API_KEY:-}" ]]; then
+    head="$(jq -r '.headRefName // ""' <<<"$pr_json")"
+    title="$(jq -r '.title // ""' <<<"$pr_json")"
+    issue_id="$(infer_issue_id "$head $title")"
+    [[ -n "$issue_id" ]] || return 0
+    issue_uuid="$(linear_issue_uuid "$issue_id" 2>/dev/null || true)"
+    [[ -n "$issue_uuid" ]] || return 0
+    local comments rc
+    set +e
+    comments="$(linear_list_comments "$issue_uuid" 2>/dev/null)"
+    rc=$?
+    set -e
+    # History unreadable -> re-verify (safe: re-polling the deploy workflow is
+    # idempotent). Evidence must be a release-manager *deployed* outcome, not a
+    # bare 'deploy=' substring that could appear in worker/human free-text.
+    (( rc == 0 )) || return 0
+    if grep -Eq '^status: deployed$|^detail:.*[[:space:]]deploy=' <<<"$comments"; then
+      return 1
+    fi
+    return 0
+  fi
+  has_merged_label="$(jq -r --arg l "$merged_label" 'any(.labels[]?; .name == $l)' <<<"$pr_json")"
+  [[ "$has_merged_label" == "true" ]] && return 1
+  return 0
+}
+
+reconcile_once() {
+  acquire_lock
+  log "reconcile repo=$github_repo base=$base_branch mode=$mode deploy_workflow=$deploy_workflow"
+
+  local candidates count pr_json pr title url head sha deploy_url processed conclusion ready_observed
+  candidates="$(list_reconcile_candidates)"
+  count="$(jq 'length' <<<"$candidates")"
+  log "found $count merged candidate PR(s)"
+  [[ "$count" -gt 0 ]] || return 0
+
+  processed=0
+  while IFS= read -r pr_json; do
+    pr="$(jq -r '.number' <<<"$pr_json")"
+    title="$(jq -r '.title' <<<"$pr_json")"
+    url="$(jq -r '.url' <<<"$pr_json")"
+    head="$(jq -r '.headRefName' <<<"$pr_json")"
+    sha="$(jq -r '.mergeCommit.oid // ""' <<<"$pr_json")"
+    if reconcile_needs_deploy "$pr_json"; then : ; else
+      echo "  SKIP  #$pr  deploy evidence present  $title"
+      continue
+    fi
+    if [[ -z "$sha" ]]; then
+      echo "  SKIP  #$pr  no merge commit sha  $title"
+      continue
+    fi
+    echo "  RECONCILE #$pr  $head  sha=$sha  $title"
+    processed=$((processed + 1))
+    ready_observed="$(date +%s)"
+    conclusion=""
+    if [[ "$mode" != "apply" ]]; then
+      echo "        dry-run: would poll $deploy_workflow on $sha"
+    else
+      if deploy_url="$(wait_for_deploy_workflow "$deploy_workflow" "$sha" 2>/dev/null)"; then
+        conclusion="deployed"
+        label_transition "$pr" "$merged_label" "$queued_label"
+        post_linear_evidence "$pr" "$url" "deployed" "reconcile deploy=$deploy_url merge_sha=$sha" "$title" "$head"
+      else
+        conclusion="failed"
+        # Reconcile candidates may carry release:queued OR release:merged; remove
+        # BOTH so a merged-label candidate cannot end up carrying release:merged
+        # AND release:failed simultaneously.
+        "$GH_BIN" pr edit "$pr" -R "$github_repo" --remove-label "$queued_label" --remove-label "$merged_label" --add-label "$failed_label" >/dev/null 2>&1 || true
+        post_linear_evidence "$pr" "$url" "failed" "reconcile deploy_workflow_failed=$deploy_workflow merge_sha=$sha" "$title" "$head"
+      fi
+      write_metrics "$pr" "$url" "$head" "$base_branch" "$conclusion" "$ready_observed" "null" "null"
+    fi
+    [[ "$processed" -lt "$max_per_run" ]] || break
+  done < <(jq -c '.[]' <<<"$candidates")
+
+  log "reconciled $processed merged PR(s)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -426,6 +725,9 @@ while [[ $# -gt 0 ]]; do
     --wait-deploy-workflow) deploy_workflow="${2:?--wait-deploy-workflow requires workflow name}"; wait_merge=true; shift 2 ;;
     --allow-no-checks) allow_no_checks=true; shift ;;
     --require-review) require_review=true; shift ;;
+    --reconcile-deploys) reconcile_deploys=true; shift ;;
+    --on-conflict) on_conflict="${2:?--on-conflict requires fail|redispatch}"; shift 2 ;;
+    --metrics-file) metrics_file="${2:?--metrics-file requires a path}"; shift 2 ;;
     --no-linear) linear_updates=false; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -439,9 +741,15 @@ repo_path="$(cd "$repo_path" && pwd)"
 [[ "$interval" =~ ^[0-9]+$ && "$interval" -gt 0 ]] || die "--interval must be > 0"
 [[ "$wait_seconds" =~ ^[0-9]+$ && "$wait_seconds" -gt 0 ]] || die "--wait-seconds must be > 0"
 case "$strategy" in queue|auto|squash|merge|rebase) ;; *) die "unsupported strategy: $strategy" ;; esac
-for value in "$base_branch" "$ready_label" "$queued_label" "$merged_label" "$failed_label" "$strategy"; do
+case "$on_conflict" in fail|redispatch) ;; *) die "--on-conflict must be fail|redispatch" ;; esac
+[[ "$max_rebase_attempts" =~ ^[0-9]+$ ]] || die "RELEASE_MANAGER_MAX_REBASE_ATTEMPTS must be a non-negative integer"
+if "$reconcile_deploys" && [[ -z "$deploy_workflow" ]]; then
+  die "--reconcile-deploys requires --wait-deploy-workflow NAME"
+fi
+for value in "$base_branch" "$ready_label" "$queued_label" "$merged_label" "$failed_label" "$strategy" "$rebase_pr_label" "$rebase_state" "$metrics_file" "${RELEASE_MANAGER_LINEAR_DONE_STATE:-Done}" "${RELEASE_MANAGER_LINEAR_FAILURE_STATE:-Todo}"; do
   safe_meta_value "argument" "$value"
 done
+[[ -z "$deploy_workflow" ]] || safe_meta_value "argument" "$deploy_workflow"
 
 command -v jq >/dev/null 2>&1 || die "jq is required"
 command -v git >/dev/null 2>&1 || die "git is required"
@@ -456,7 +764,11 @@ if [[ "$mode" == "dry-run" ]]; then
 fi
 
 while true; do
-  process_once
+  if "$reconcile_deploys"; then
+    reconcile_once
+  else
+    process_once
+  fi
   "$loop" || break
   log "sleeping ${interval}s"
   sleep "$interval"

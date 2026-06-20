@@ -71,16 +71,37 @@ else
 fi
 
 section "2. Environment"
-for var in RELEASE_MANAGER_READY_LABEL RELEASE_MANAGER_QUEUED_LABEL RELEASE_MANAGER_MERGED_LABEL RELEASE_MANAGER_FAILED_LABEL RELEASE_MANAGER_BASE_BRANCH RELEASE_MANAGER_STRATEGY; do
-  if [[ -n "${!var:-}" ]]; then pass "$var=${!var}"; else fail "$var unset"; fi
+# These all have built-in defaults inside release-manager, so an unset var is
+# NOT a hard failure (e.g. the doctor was run without sourcing env.sh, or from a
+# PATH install). WARN so a GitHub-only user is not blocked by a cosmetic gap.
+for var in RELEASE_MANAGER_READY_LABEL RELEASE_MANAGER_QUEUED_LABEL RELEASE_MANAGER_MERGED_LABEL RELEASE_MANAGER_FAILED_LABEL RELEASE_MANAGER_BASE_BRANCH RELEASE_MANAGER_STRATEGY RELEASE_MANAGER_ON_CONFLICT RELEASE_MANAGER_REBASE_PR_LABEL RELEASE_MANAGER_REBASE_STATE RELEASE_MANAGER_MAX_REBASE_ATTEMPTS RELEASE_MANAGER_METRICS_FILE; do
+  if [[ -n "${!var:-}" ]]; then pass "$var=${!var}"; else warn "$var unset (release-manager applies a built-in default)"; fi
 done
-if [[ -n "${CLAUDE_RUNS_ROOT:-}" && -d "$CLAUDE_RUNS_ROOT" && -w "$CLAUDE_RUNS_ROOT" ]]; then
+# CLAUDE_RUNS_ROOT not existing yet is NOT a failure: release-manager mkdir -p's
+# it on first apply. Only FAIL when it is unset, or exists-but-unwritable, or its
+# parent is not writable (genuinely uncreatable). This avoids a day-one false
+# FAIL for a fresh clone that has never run the lane.
+if [[ -z "${CLAUDE_RUNS_ROOT:-}" ]]; then
+  fail "CLAUDE_RUNS_ROOT unset (source env.sh first)"
+elif [[ -d "$CLAUDE_RUNS_ROOT" && -w "$CLAUDE_RUNS_ROOT" ]]; then
   pass "CLAUDE_RUNS_ROOT writable ($CLAUDE_RUNS_ROOT)"
+elif [[ ! -e "$CLAUDE_RUNS_ROOT" && -w "$(dirname "$CLAUDE_RUNS_ROOT")" ]]; then
+  pass "CLAUDE_RUNS_ROOT not created yet; parent writable — release-manager will create it ($CLAUDE_RUNS_ROOT)"
 else
-  fail "CLAUDE_RUNS_ROOT missing or not writable (${CLAUDE_RUNS_ROOT:-unset})"
+  fail "CLAUDE_RUNS_ROOT exists but is not writable, or its parent is not writable ($CLAUDE_RUNS_ROOT)"
+fi
+
+metrics_file="${RELEASE_MANAGER_METRICS_FILE:-${CLAUDE_RUNS_ROOT:-$SYMPHONY_CLAUDE_ROOT/runs}/release-metrics.jsonl}"
+metrics_dir="$(dirname "$metrics_file")"
+if [[ -w "$metrics_dir" ]]; then
+  pass "metrics file parent dir writable ($metrics_dir)"
+else
+  warn "metrics file parent dir not writable ($metrics_dir); apply-mode metrics writes will fail"
 fi
 
 section "3. GitHub"
+strategy="${RELEASE_MANAGER_STRATEGY:-queue}"
+repo_meta=""          # cached `gh repo view --json …` blob, reused by section 4
 if command -v "$GH_BIN" >/dev/null 2>&1 && "$GH_BIN" auth status >/dev/null 2>&1; then
   pass "gh auth status ok"
 else
@@ -96,6 +117,47 @@ if [[ -n "$repo_path" ]]; then
       pass "GitHub repo slug: $slug"
       if "$GH_BIN" repo view "$slug" --json nameWithOwner >/dev/null 2>&1; then
         pass "gh can read repository $slug"
+        repo_meta="$("$GH_BIN" repo view "$slug" --json nameWithOwner,isInOrganization,visibility 2>/dev/null || true)"
+
+        # "Allow auto-merge" repo setting. --strategy queue/auto runs
+        # `gh pr merge --auto`, which GitHub REJECTS unless the repo has auto-merge
+        # enabled (or a merge queue is configured). Without it, EVERY ready PR is
+        # labeled release:failed — the lane's default strategy silently breaks.
+        # NB: autoMergeAllowed is NOT a valid `gh repo view --json` field; it must
+        # come from REST (.allow_auto_merge). Returns true/false, or empty on error.
+        auto_merge="$("$GH_BIN" api "repos/$slug" --jq '.allow_auto_merge' 2>/dev/null || true)"
+        case "$strategy" in
+          queue|auto)
+            if [[ "$auto_merge" == "true" ]]; then
+              pass "Allow auto-merge enabled (required for --strategy $strategy)"
+            elif [[ "$auto_merge" == "false" ]]; then
+              warn "Allow auto-merge is OFF but --strategy $strategy uses 'gh pr merge --auto', which will FAIL every PR.
+            Fix: enable it (gh repo edit $slug --enable-auto-merge) plus a merge queue or required check,
+            OR use --strategy squash for an immediate one-at-a-time merge that needs no repo setting."
+            else
+              warn "could not read autoMergeAllowed for $slug; if --strategy $strategy fails to merge, enable Allow auto-merge or use --strategy squash"
+            fi
+            ;;
+          *)
+            pass "--strategy $strategy merges immediately; 'Allow auto-merge' not required"
+            ;;
+        esac
+
+        # The lane reads/writes these labels via `gh pr edit --add-label`, which
+        # fails silently (|| true) when the label does not exist — a queued PR then
+        # never gets relabeled. Pre-create any that are missing.
+        existing_labels="$("$GH_BIN" label list -R "$slug" --limit 200 --json name -q '.[].name' 2>/dev/null || true)"
+        if [[ -n "$existing_labels" ]]; then
+          for lbl in "${RELEASE_MANAGER_READY_LABEL:-release:ready}" "${RELEASE_MANAGER_QUEUED_LABEL:-release:queued}" "${RELEASE_MANAGER_MERGED_LABEL:-release:merged}" "${RELEASE_MANAGER_FAILED_LABEL:-release:failed}"; do
+            if grep -qxF "$lbl" <<<"$existing_labels"; then
+              pass "label exists: $lbl"
+            else
+              warn "label missing: $lbl (create it: gh label create '$lbl' -R $slug) — label writes fail silently otherwise"
+            fi
+          done
+        else
+          warn "could not list labels for $slug; ensure release:ready/queued/merged/failed exist"
+        fi
       else
         warn "gh cannot read repository $slug"
       fi
@@ -109,7 +171,85 @@ else
   warn "--repo not provided; skipping repo-specific GitHub checks"
 fi
 
-section "4. Linear"
+section "4. Merge queue / serialization"
+if ! command -v "$GH_BIN" >/dev/null 2>&1; then
+  warn "gh not found ($GH_BIN); cannot check merge serialization config"
+else
+  mq_slug="$(resolve_repo_slug 2>/dev/null || true)"
+  base_branch="${RELEASE_MANAGER_BASE_BRANCH:-main}"
+  if [[ -z "$mq_slug" ]]; then
+    warn "could not resolve GitHub repo slug; pass --repo or --github-repo to check merge-queue config"
+  else
+    # Merge Queue availability is gated by repo OWNER TYPE: it exists only on
+    # organization-owned repos (public on any org plan; private only on GitHub
+    # Enterprise Cloud). On a personal-account repo the queue cannot be enabled
+    # at all, so --strategy queue degrades to plain auto-merge — recommend
+    # --strategy squash there for guaranteed serialized merges.
+    [[ -n "$repo_meta" ]] || repo_meta="$("$GH_BIN" repo view "$mq_slug" --json isInOrganization,visibility 2>/dev/null || true)"
+    # NB: plain extraction (not `// empty`) — false must stay "false", not blank.
+    in_org="$(jq -r '.isInOrganization' <<<"${repo_meta:-{}}" 2>/dev/null || true)"
+    if [[ "$in_org" == "false" ]]; then
+      warn "$mq_slug is personal-account-owned; GitHub Merge Queue is NOT available here (org-owned repos only).
+            Use --strategy squash for serialized merges, or transfer the repo to an organization for batched throughput."
+    elif [[ "$in_org" == "true" ]]; then
+      pass "$mq_slug is organization-owned (Merge Queue is available to configure)"
+    fi
+
+    # Read the two signals that decide whether the no-queue path is merely slower
+    # or the FULL rebase storm:
+    #   merge_queue — GitHub batches + serializes merges (the real throughput fix)
+    #   strict      — "require branches up to date before merging". With strict ON
+    #                 and NO queue, every landed PR staleness-invalidates the rest
+    #                 → re-update → re-run CI one-at-a-time = the rebase storm itself.
+    #                 A single-writer release lane does NOT save you from this; only
+    #                 the queue (or turning strict off) does. Surface it loudly.
+    # The consolidated rules endpoint covers rulesets; classic branch protection is
+    # probed as a fallback (it is not surfaced by /rules/branches). Branch names
+    # with slashes (release/v1) are URL-encoded for the REST path.
+    mq_found=0
+    strict_on=unknown
+    enc_base="${base_branch//\//%2F}"
+    rules_json="$("$GH_BIN" api "repos/$mq_slug/rules/branches/$enc_base" 2>/dev/null || true)"
+    if [[ -n "$rules_json" ]] && jq -e 'type == "array"' >/dev/null 2>&1 <<<"$rules_json"; then
+      jq -e 'any(.[]?; .type == "merge_queue")' >/dev/null 2>&1 <<<"$rules_json" && mq_found=1
+      if jq -e 'any(.[]?; .type == "required_status_checks")' >/dev/null 2>&1 <<<"$rules_json"; then
+        if jq -e 'any(.[]?; .type == "required_status_checks" and (.parameters.strict_required_status_checks_policy == true))' >/dev/null 2>&1 <<<"$rules_json"; then
+          strict_on=true
+        else
+          strict_on=false
+        fi
+      fi
+    fi
+    if [[ "$mq_found" -eq 0 || "$strict_on" == "unknown" ]]; then
+      # Classic branch-protection fallback (object; a 404 returns {"message":...}).
+      prot_json="$("$GH_BIN" api "repos/$mq_slug/branches/$enc_base/protection" 2>/dev/null || true)"
+      if [[ -n "$prot_json" ]] && jq -e 'type == "object" and (has("message") | not)' >/dev/null 2>&1 <<<"$prot_json"; then
+        jq -e '.required_merge_queue // empty' >/dev/null 2>&1 <<<"$prot_json" && mq_found=1
+        if jq -e 'has("required_status_checks")' >/dev/null 2>&1 <<<"$prot_json"; then
+          if jq -e '.required_status_checks.strict == true' >/dev/null 2>&1 <<<"$prot_json"; then
+            strict_on=true
+          elif [[ "$strict_on" == "unknown" ]]; then
+            strict_on=false
+          fi
+        fi
+      fi
+    fi
+
+    strict_display="$strict_on"; [[ "$strict_on" == "unknown" ]] && strict_display="could not determine"
+    if [[ "$mq_found" -eq 1 ]]; then
+      pass "GitHub Merge Queue configured for $mq_slug:$base_branch (batched, serialized merges)"
+    elif [[ "$strict_on" == "true" ]]; then
+      warn "REBASE-STORM RISK: $mq_slug:$base_branch requires branches up-to-date before merging (strict) with NO merge queue.
+            Parallel PRs staleness-invalidate each other and re-run CI one-at-a-time — the exact storm this lane exists to prevent.
+            Fix: enable a merge queue (org repo), OR turn off strict 'require up to date', OR run --strategy squash and accept serial latency."
+    else
+      warn "no merge queue for $mq_slug:$base_branch; --strategy queue/auto uses plain auto-merge (no batched validation).
+            Merges land serially (~one CI cycle per PR) — use --strategy squash for guaranteed serialization. (strict up-to-date checks: $strict_display)"
+    fi
+  fi
+fi
+
+section "5. Linear"
 if [[ -z "${LINEAR_API_KEY:-}" ]]; then
   warn "LINEAR_API_KEY unset; release-manager can run with --no-linear"
 else
@@ -121,7 +261,7 @@ else
   if [[ -n "$viewer" ]]; then pass "Linear viewer query ok ($viewer)"; else warn "Linear viewer query failed"; fi
 fi
 
-section "5. Locks"
+section "6. Locks"
 lock_count=0
 stale_count=0
 if [[ -d "${CLAUDE_RUNS_ROOT:-}" ]]; then

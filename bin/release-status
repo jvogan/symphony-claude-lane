@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# release-status — read-only snapshot of the release lane (PR backlog + metrics).
+#
+# This tool NEVER mutates GitHub, Linear, or local files. It lists PR counts
+# per release lane label, the oldest PR age in each lane, and (if present)
+# summarizes the release-metrics.jsonl time-to-main distribution. There is no
+# --apply mode and it never takes the release lock.
+set -euo pipefail
+
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+
+repo_path=""
+github_repo=""
+base_branch="${RELEASE_MANAGER_BASE_BRANCH:-main}"
+locks_root="${CLAUDE_RUNS_ROOT:-$SYMPHONY_CLAUDE_ROOT/runs}"
+metrics_file="${RELEASE_MANAGER_METRICS_FILE:-$locks_root/release-metrics.jsonl}"
+
+GH_BIN="${RELEASE_MANAGER_GH_BIN:-gh}"
+
+usage() {
+  cat >&2 <<EOF
+Usage: $(basename "$0") --repo PATH [options]
+
+Read-only snapshot of the release lane. Never mutates GitHub/Linear/local files.
+
+Required:
+  --repo PATH                 Local git repo whose release lane to inspect.
+
+Options:
+  --github-repo OWNER/NAME    GitHub repo slug. Defaults from origin remote.
+  --base BRANCH               Target branch (default: $base_branch).
+  --metrics-file PATH         release-metrics.jsonl to summarize
+                              (default: \$RELEASE_MANAGER_METRICS_FILE or
+                               \$CLAUDE_RUNS_ROOT/release-metrics.jsonl).
+  -h, --help                  Show this help and exit.
+
+Environment:
+  RELEASE_MANAGER_GH_BIN      Override gh binary path (used by tests).
+EOF
+}
+
+die() { echo "release-status: error: $*" >&2; exit 2; }
+log() { echo "[release-status] $*"; }
+
+safe_meta_value() {
+  local name="$1" value="$2"
+  [[ "$value" != *$'\n'* ]] || die "$name contains newline"
+  [[ "$value" != *"'"* ]] || die "$name contains single quote"
+}
+
+parse_origin_slug() {
+  local url="$1"
+  case "$url" in
+    git@github.com:*)
+      url="${url#git@github.com:}"
+      url="${url%.git}"
+      ;;
+    https://github.com/*|http://github.com/*)
+      url="${url#https://github.com/}"
+      url="${url#http://github.com/}"
+      url="${url%.git}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ "$url" =~ ^[^/]+/[^/]+$ ]] || return 1
+  printf '%s\n' "$url"
+}
+
+resolve_github_repo() {
+  if [[ -n "$github_repo" ]]; then
+    printf '%s\n' "$github_repo"
+    return 0
+  fi
+  local origin
+  origin="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+  if [[ -n "$origin" ]] && parse_origin_slug "$origin" >/dev/null; then
+    parse_origin_slug "$origin"
+    return 0
+  fi
+  (cd "$repo_path" && "$GH_BIN" repo view --json nameWithOwner -q .nameWithOwner)
+}
+
+# Humanize a duration in seconds to a compact age string (e.g. 90061 -> "1d").
+humanize_age() {
+  local secs="$1"
+  if [[ -z "$secs" || ! "$secs" =~ ^[0-9]+$ ]]; then
+    printf 'n/a'
+    return 0
+  fi
+  if (( secs < 60 )); then
+    printf '%ds' "$secs"
+  elif (( secs < 3600 )); then
+    printf '%dm' $(( secs / 60 ))
+  elif (( secs < 86400 )); then
+    printf '%dh' $(( secs / 3600 ))
+  else
+    printf '%dd' $(( secs / 86400 ))
+  fi
+}
+
+# Print one section line for a label: count + oldest PR age.
+# Lists open PRs (or --state all for terminal labels) and computes the oldest
+# createdAt age vs now. Read-only: only ever calls `gh pr list`.
+label_section() {
+  local name="$1" label="$2" state="$3" prs count oldest_created now age
+  prs="$("$GH_BIN" pr list -R "$github_repo" --label "$label" --state "$state" --json number,title,url,createdAt 2>/dev/null || echo '[]')"
+  count="$(jq 'length' <<<"$prs" 2>/dev/null || echo 0)"
+  if [[ "$count" -gt 0 ]]; then
+    now="$(date +%s)"
+    # Oldest = smallest createdAt epoch; age = now - that.
+    oldest_created="$(jq -r '[ .[] | .createdAt | fromdateiso8601 ] | min // empty' <<<"$prs" 2>/dev/null || echo '')"
+    if [[ -n "$oldest_created" ]]; then
+      age="$(humanize_age "$(( now - oldest_created ))")"
+      printf '  %-8s %s  (oldest %s)\n' "$name" "$count" "$age"
+    else
+      printf '  %-8s %s\n' "$name" "$count"
+    fi
+  else
+    printf '  %-8s %s\n' "$name" "$count"
+  fi
+}
+
+# Summarize the metrics JSONL: merged-record count + p50/p90 of time_to_main_s.
+# Degrades to "no metrics yet" when the file is absent or empty.
+metrics_section() {
+  if [[ ! -s "$metrics_file" ]]; then
+    printf '  metrics  no metrics yet\n'
+    return 0
+  fi
+  local summary
+  # Parse line-by-line with `fromjson?` so a single torn/half-written record
+  # (e.g. an interrupted append) is skipped instead of aborting the whole slurp
+  # and silently hiding every valid metric.
+  summary="$(jq -R 'fromjson? // empty' "$metrics_file" 2>/dev/null | jq -rs '
+    # Nearest-rank percentile over a pre-sorted array $v (1-based rank
+    # ceil(p*n), clamped to [1,n]); index is rank-1.
+    def pct($v; p): ($v | length) as $n
+      | ( ([ (p * $n | ceil), 1 ] | max) as $rank | [ $rank, $n ] | min ) as $rank
+      | $v[$rank - 1];
+    [ .[] | select(type == "object") ]                                  as $rows
+    | [ $rows[] | select(.conclusion == "merged" or .conclusion == "deployed") ] | length as $merged
+    | ( [ $rows[] | .time_to_main_s | select(. != null) ] | sort )       as $ttm
+    | ($ttm | length)                                                    as $n
+    | if $n == 0 then
+        "merged=\($merged)\tno time-to-main yet"
+      else
+        "merged=\($merged)\tn=\($n) p50=\(pct($ttm; 0.5)) p90=\(pct($ttm; 0.9))"
+      end
+  ' 2>/dev/null || true)"
+  if [[ -z "$summary" ]]; then
+    printf '  metrics  no metrics yet\n'
+    return 0
+  fi
+  local merged_part ttm_part merged_count
+  merged_part="${summary%%$'\t'*}"
+  ttm_part="${summary#*$'\t'}"
+  merged_count="${merged_part#merged=}"
+  # ttm_part is already 'n=3 p50=300 p90=500' (or 'no time-to-main yet').
+  printf '  merged   %s\n' "$merged_count"
+  printf '  time-to-main: %s\n' "$ttm_part"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --repo) repo_path="${2:?--repo requires a path}"; shift 2 ;;
+    --github-repo) github_repo="${2:?--github-repo requires OWNER/NAME}"; shift 2 ;;
+    --base) base_branch="${2:?--base requires branch}"; shift 2 ;;
+    --metrics-file) metrics_file="${2:?--metrics-file requires a path}"; shift 2 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$repo_path" ]] || { usage; exit 2; }
+[[ -d "$repo_path/.git" ]] || die "not a git repo: $repo_path"
+repo_path="$(cd "$repo_path" && pwd)"
+for value in "$base_branch" "$metrics_file"; do
+  safe_meta_value "argument" "$value"
+done
+
+command -v jq >/dev/null 2>&1 || die "jq is required"
+command -v git >/dev/null 2>&1 || die "git is required"
+command -v "$GH_BIN" >/dev/null 2>&1 || die "gh not found: $GH_BIN"
+
+github_repo="$(resolve_github_repo)"
+[[ "$github_repo" =~ ^[^/]+/[^/]+$ ]] || die "could not resolve GitHub repo slug; pass --github-repo OWNER/NAME"
+
+log "repo=$github_repo base=$base_branch metrics=$metrics_file"
+
+# Backlog: ready/queued are open-state lanes; merged/failed are terminal so use
+# --state all to surface PRs that already left the open set.
+label_section "ready"  "${RELEASE_MANAGER_READY_LABEL:-release:ready}"   "open"
+label_section "queued" "${RELEASE_MANAGER_QUEUED_LABEL:-release:queued}" "open"
+label_section "merged" "${RELEASE_MANAGER_MERGED_LABEL:-release:merged}" "all"
+label_section "failed" "${RELEASE_MANAGER_FAILED_LABEL:-release:failed}" "all"
+
+metrics_section
