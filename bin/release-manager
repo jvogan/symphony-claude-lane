@@ -842,5 +842,13 @@ while true; do
   fi
   "$loop" || break
   log "sleeping ${interval}s"
-  sleep "$interval"
+  # Sleep in the BACKGROUND and wait, so a trapped SIGINT/SIGTERM is honored
+  # immediately. bash runs a trap only AFTER the current foreground command
+  # finishes, so a plain `sleep "$interval"` would defer Ctrl-C / a supervisor's
+  # SIGTERM up to --interval seconds — long enough that a process manager may
+  # escalate to SIGKILL, which skips the EXIT trap and leaks the lock. `wait`
+  # returns the instant the signal arrives, so the INT/TERM trap (exit) runs now
+  # and the EXIT trap releases the lock cleanly.
+  sleep "$interval" &
+  wait "$!" 2>/dev/null || true
 done

@@ -523,13 +523,16 @@ else
 fi
 unset GH_STUB_LIST_QUEUED
 
-banner "Loop exits on SIGTERM and releases the lock (signal must not resume)"
+banner "Loop exits PROMPTLY on SIGTERM and releases the lock (signal not deferred by the sleep)"
 : > "$GH_STUB_LOG"
 rm -rf "$CLAUDE_RUNS_ROOT"/.release-manager.lock-*.d 2>/dev/null || true
 # Empty candidate + queued lists: the loop just polls (holding its lock), so we
-# can signal it deterministically. A short interval keeps passes quick.
+# can signal it deterministically. A LONG interval (20s) is deliberate: bash runs
+# a trap only after the running foreground command finishes, so a plain
+# `sleep $interval` would defer the exit up to 20s. The loop must sleep in the
+# background and `wait`, so SIGTERM is honored within a couple seconds, not 20.
 "$ROOT/bin/release-manager" --repo "$REPO" --github-repo example/release-manager-test \
-  --apply --no-linear --strategy squash --loop --interval 1 >/dev/null 2>&1 &
+  --apply --no-linear --strategy squash --loop --interval 20 >/dev/null 2>&1 &
 sigterm_pid=$!
 for _ in $(seq 1 30); do
   ls -d "$CLAUDE_RUNS_ROOT"/.release-manager.lock-*.d >/dev/null 2>&1 && break || true
@@ -542,14 +545,14 @@ else
 fi
 kill -TERM "$sigterm_pid" 2>/dev/null || true
 sigterm_gone=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 60); do   # ~6s window, well under the 20s --interval
   kill -0 "$sigterm_pid" 2>/dev/null || { sigterm_gone=1; break; }
   sleep 0.1
 done
 if [[ "$sigterm_gone" == "1" ]]; then
-  ok "loop process exits on SIGTERM (trap converts signal to exit, not resume)"
+  ok "loop exits promptly on SIGTERM (<6s, not deferred to the 20s interval)"
 else
-  bad "loop process SURVIVED SIGTERM (trap cleaned up but resumed the loop)"
+  bad "loop did NOT exit within 6s of SIGTERM (foreground sleep deferred the trap up to --interval)"
   kill -9 "$sigterm_pid" 2>/dev/null || true
 fi
 wait "$sigterm_pid" 2>/dev/null || true
