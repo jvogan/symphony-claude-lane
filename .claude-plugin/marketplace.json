@@ -2,7 +2,7 @@
   "name": "symphony-claude-lane",
   "metadata": {
     "description": "Long-horizon multi-agent orchestration via Linear. Route Claude Code and Codex workers by task characteristics with tmux or headless backend options.",
-    "version": "3.0.0-rc2"
+    "version": "3.0.0-rc3"
   },
   "plugins": [
     {

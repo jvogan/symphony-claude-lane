@@ -1,6 +1,6 @@
 # Symphony + Claude Lane
 
-> Long-horizon multi-agent orchestration via Linear. Claude Code workers run subscription-billed in attachable tmux sessions, optionally paired with Codex via Symphony. This installable Agent Skill adds the Claude lane: Symphony dispatches Codex workers through its Elixir runtime; this skill adds Claude workers as **interactive sessions in detached tmux panes**, tracked through the same Linear backlog, with smart routing that sends each task to the right agent. As of v3.0.0-rc2 the default backend is tmux; teams that intentionally prefer API-priced headless execution can adapt the launcher to `claude -p` while preserving the same routing and closeout contracts. See docs/backend-options.md.
+> Long-horizon multi-agent orchestration via Linear. Claude Code workers run subscription-billed in attachable tmux sessions, optionally paired with Codex via Symphony. This installable Agent Skill adds the Claude lane: Symphony dispatches Codex workers through its Elixir runtime; this skill adds Claude workers as **interactive sessions in detached tmux panes**, tracked through the same Linear backlog, with smart routing that sends each task to the right agent. As of v3.0.0-rc3 the default backend is tmux; teams that intentionally prefer API-priced headless execution can adapt the launcher to `claude -p` while preserving the same routing and closeout contracts. See docs/backend-options.md.
 
 ## What this is
 

@@ -3,7 +3,7 @@ name: symphony-claude-lane
 description: Teach an orchestrator long-horizon multi-agent dispatch for Symphony + Linear workflows. Use when an agent needs to route tasks to Claude Code or Codex by task characteristics, choose a tmux or headless Claude backend, create a durable routing profile, and define visual verification, privacy, closeout, and cleanup rules.
 metadata:
   short-description: Long-horizon multi-agent orchestration via Linear
-  version: "3.0.0-rc2"
+  version: "3.0.0-rc3"
 ---
 
 # Symphony + Claude Lane
