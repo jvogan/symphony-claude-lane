@@ -10,20 +10,36 @@
 #
 # WHY SEVERAL TRIGGERS — the release-manager only merges a PR once its CI is
 # GREEN. A worker usually adds `release:ready` WHILE CI is still running, so a
-# single `labeled` trigger would observe pending checks and skip. We therefore
-# also re-run when a check suite COMPLETES, plus a periodic safety net:
-#   - pull_request (labeled)   : label added when CI was already green
-#   - check_suite (completed)  : CI finished after the label was added  <-- key
-#   - schedule (cron)          : backstop (e.g. external / commit-status checks
-#                                that do not emit check_suite events)
-#   - workflow_dispatch        : manual kick
-# Each run re-evaluates the whole ready+green queue, so the exact triggering PR
-# does not matter — any trigger drains everything currently mergeable.
+# lone `labeled` trigger would observe pending checks and skip. The other
+# triggers re-evaluate the queue once CI lands:
+#   - pull_request (labeled)  : label added when CI was already green.
+#   - workflow_run (completed): the RELIABLE "after CI" trigger when your CI is
+#                               a GitHub Actions workflow — uncomment it below
+#                               and set your CI workflow's name.
+#   - check_suite (completed) : fires for THIRD-PARTY CI apps (CircleCI, etc.).
+#                               NOTE: GitHub does NOT emit check_suite for suites
+#                               created by GitHub Actions (anti-recursion), so it
+#                               will NOT fire if your CI is GitHub Actions — rely
+#                               on workflow_run or the cron in that case.
+#   - schedule (cron)         : backstop, and the real cadence when your CI is
+#                               GitHub Actions. Tighten for lower merge latency.
+#   - workflow_dispatch       : manual kick.
+# Each run re-evaluates the whole ready+green queue, so the triggering PR does
+# not matter — any trigger drains everything currently mergeable.
 #
 # SERIALIZATION — the `concurrency` group ensures only ONE release-manager run
 # executes at a time across all triggers. That is the single-writer guarantee
 # that kills the rebase storm; it replaces the local mkdir-lock the CLI uses on
-# a workstation.
+# a workstation. Run the Action OR a local `--loop`, not both — two hosts do not
+# share a lock.
+#
+# CAVEATS —
+#   * Commit this on your DEFAULT branch: schedule / check_suite / workflow_run
+#     triggers are ignored on non-default branches.
+#   * Merges here are made by GITHUB_TOKEN, whose pushes do NOT trigger other
+#     workflows (an `on: push` deploy on the base branch will not fire). If you
+#     need downstream automation on merge, swap in a PAT or GitHub App token:
+#     `GH_TOKEN: ${{ secrets.RELEASE_PAT }}`.
 #
 # TRUST BOUNDARY — a PR is merged only if it BOTH carries `release:ready` AND
 # has green CI. The real guard on `main` is therefore who/what can add the
@@ -35,10 +51,15 @@ name: Release on ready
 on:
   pull_request:
     types: [labeled]
-  check_suite:
+  # If your CI is a GitHub Actions workflow, THIS is the reliable "after CI"
+  # trigger — uncomment and set your CI workflow's name (its `name:` field):
+  # workflow_run:
+  #   workflows: ["CI"]
+  #   types: [completed]
+  check_suite:              # fires for third-party CI apps; NOT for GitHub Actions
     types: [completed]
   schedule:
-    - cron: '*/10 * * * *'   # backstop every 10 min; tune or remove
+    - cron: '*/5 * * * *'   # backstop, and the real cadence if CI is GitHub Actions
   workflow_dispatch:
 
 permissions:

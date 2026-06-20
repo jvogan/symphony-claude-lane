@@ -168,9 +168,15 @@ acquire_lock() {
       done
     fi
     if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
-      die "another release-manager is running for repo=$repo_path base=$base_branch label=$ready_label (pid $holder)"
+      # Guard against PID reuse on long-running hosts: only honor the lock if the
+      # live PID is actually a release-manager, not an unrelated recycled PID.
+      if ps -p "$holder" -o command= 2>/dev/null | grep -q 'release-manager'; then
+        die "another release-manager is running for repo=$repo_path base=$base_branch label=$ready_label (pid $holder)"
+      fi
+      log "stale release lock at $lock_dir (pid $holder reused by a non-release-manager process) — taking over"
+    else
+      log "stale release lock at $lock_dir (pid ${holder:-unknown} no such process after retry) — taking over"
     fi
-    log "stale release lock at $lock_dir (pid ${holder:-unknown} no such process after retry) — taking over"
     rm -rf "$lock_dir" 2>/dev/null
     mkdir "$lock_dir" 2>/dev/null || die "could not acquire release lock"
   fi
@@ -522,8 +528,29 @@ process_once() {
 
   local candidates count pr_json pr ready_rc reason title url head processed merge_sha deploy_url
   local conclusion ready_observed queued_at merged_at_epoch conflict_conclusion
-  candidates="$(list_candidates)"
-  count="$(jq 'length' <<<"$candidates")"
+
+  # Reclaim orphans before listing: an OPEN PR still carrying the queued label is
+  # the residue of an interruption between the ready->queued flip and a completed
+  # merge (crash, SIGINT, host reboot). We hold the lock, so no healthy concurrent
+  # pass owns it — move it back to the ready label so the normal flow below
+  # re-drives it (idempotent; re-checks CI and conflict state from scratch).
+  if [[ "$mode" == "apply" ]]; then
+    local orphan_nums onum
+    orphan_nums="$("$GH_BIN" pr list -R "$github_repo" --base "$base_branch" --state open --label "$queued_label" --json number --jq '.[].number' 2>/dev/null || true)"
+    if [[ -n "$orphan_nums" ]]; then
+      while IFS= read -r onum; do
+        [[ "$onum" =~ ^[0-9]+$ ]] || continue
+        log "reclaiming orphaned $queued_label PR #$onum (interrupted before merge) -> $ready_label"
+        label_transition "$onum" "$ready_label" "$queued_label"
+      done <<<"$orphan_nums"
+    fi
+  fi
+
+  if ! candidates="$(list_candidates 2>/dev/null)"; then
+    log "warning: could not list $ready_label PRs (transient gh error?) — will retry next pass"
+    return 0
+  fi
+  count="$(jq 'length' <<<"$candidates" 2>/dev/null || echo 0)"
   log "found $count candidate PR(s)"
   [[ "$count" -gt 0 ]] || return 0
 
@@ -538,13 +565,14 @@ process_once() {
     ready_rc=$?
     set -e
     if [[ "$ready_rc" -ne 0 ]]; then
-      # Closed-loop conflict recovery: a DIRTY (merge conflict) PR can be
-      # redispatched instead of merely skipped. Fail-closed — only when
-      # redispatch is requested, we are applying, AND Linear is usable so the
-      # retry counter is knowable (the primary anti-infinite-loop guard). Any
-      # other skip reason (DRAFT/BLOCKED/checks/review) falls through unchanged.
-      if [[ "$reason" == "merge_state=DIRTY" && "$on_conflict" == "redispatch" && "$mode" == "apply" ]]; then
-        if "$linear_updates" && [[ -n "${LINEAR_API_KEY:-}" ]]; then
+      # A DIRTY (merge-conflict) PR gets special handling so it does not sit in
+      # the ready set being re-skipped every pass forever. Other skip reasons
+      # (DRAFT/BLOCKED/checks/review) are transient and fall through unchanged.
+      if [[ "$reason" == "merge_state=DIRTY" && "$mode" == "apply" ]]; then
+        # Closed-loop recovery: redispatch the producer to rebase. Fail-closed —
+        # only when redispatch is requested AND Linear is usable so the retry
+        # counter is knowable (the primary anti-infinite-loop guard).
+        if [[ "$on_conflict" == "redispatch" ]] && "$linear_updates" && [[ -n "${LINEAR_API_KEY:-}" ]]; then
           echo "  CONFLICT #$pr  $reason  $title"
           handle_conflict "$pr" "$url" "$title" "$head"
           conflict_conclusion="$CONFLICT_CONCLUSION"
@@ -554,7 +582,16 @@ process_once() {
           fi
           continue
         fi
-        log "conflict: PR #$pr DIRTY and --on-conflict redispatch, but Linear unusable; skipping (retry count unknowable)"
+        # No automatic recovery (on_conflict=fail, --no-linear, or Linear
+        # unusable): take the PR OUT of the ready set so it stops re-skipping
+        # every pass, and surface it. The producer rebases, re-runs validation,
+        # and re-adds the ready label to re-enter the queue (see the docs).
+        [[ "$on_conflict" == "redispatch" ]] && log "conflict: PR #$pr DIRTY and --on-conflict redispatch, but Linear unusable; failing instead of re-skipping forever"
+        echo "  CONFLICT #$pr  $reason -> $failed_label (rebase needed)  $title"
+        label_transition "$pr" "$failed_label" "$ready_label"
+        "$GH_BIN" pr comment "$pr" -R "$github_repo" --body "release-manager: this PR conflicts with \`$base_branch\` (mergeStateStatus=DIRTY) and was not merged. Rebase onto \`$base_branch\`, re-run validation, then re-add the \`$ready_label\` label to re-enter the queue." >/dev/null 2>&1 || true
+        write_metrics "$pr" "$url" "$head" "$base_branch" "conflict_failed" "$(date +%s)" "null" "null"
+        continue
       fi
       echo "  SKIP  #$pr  $reason  $title"
       continue
@@ -611,6 +648,9 @@ process_once() {
   done < <(jq -c '.[]' <<<"$candidates")
 
   log "processed $processed ready PR(s)"
+  if [[ "$processed" -ge "$max_per_run" ]] && ! "$loop"; then
+    log "note: hit --max=$max_per_run this pass; re-run (or add --loop) to drain any remaining $ready_label PRs"
+  fi
 }
 
 reconcile_query_fields='number,title,url,headRefName,baseRefName,labels,mergeCommit'
@@ -764,10 +804,18 @@ if [[ "$mode" == "dry-run" ]]; then
 fi
 
 while true; do
+  # Run each pass tolerantly: when looping, a transient failure (gh rate limit,
+  # network blip) must not kill the daemon — log it and retry next interval. In
+  # one-shot mode, surface the failure by exiting non-zero.
+  pass_rc=0
   if "$reconcile_deploys"; then
-    reconcile_once
+    reconcile_once || pass_rc=$?
   else
-    process_once
+    process_once || pass_rc=$?
+  fi
+  if (( pass_rc != 0 )); then
+    "$loop" || exit "$pass_rc"
+    log "pass exited rc=$pass_rc; continuing loop after ${interval}s"
   fi
   "$loop" || break
   log "sleeping ${interval}s"

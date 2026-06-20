@@ -69,7 +69,7 @@ If your team prefers API-priced or fully headless execution, keep the same routi
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** and/or **[Codex](https://openai.com/index/codex/)** installed
 - the **`gh` CLI** authenticated (`gh auth status`)
 - a GitHub repo where you can create labels (for the `release:*` handoff state machine)
-- `tmux`, `jq`, `git` on the dispatcher host
+- `gh`, `jq`, `git` for the release manager itself; **`tmux` + `claude` only if you use the bundled worker launcher** (driving workers yourself doesn't need them)
 
 No Linear or Symphony required for GitHub-only mode — see [`docs/github-only-quickstart.md`](docs/github-only-quickstart.md). Use `bin/release-manager-doctor` (not `bin/claude-doctor`) as the GitHub-only preflight.
 

@@ -7,14 +7,16 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
 
 repo_path=""
 github_repo=""
+strategy_arg=""
 GH_BIN="${RELEASE_MANAGER_GH_BIN:-gh}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) repo_path="${2:?--repo requires a path}"; shift 2 ;;
     --github-repo) github_repo="${2:?--github-repo requires OWNER/NAME}"; shift 2 ;;
+    --strategy) strategy_arg="${2:?--strategy requires queue|auto|squash|merge|rebase}"; shift 2 ;;
     -h|--help)
-      echo "Usage: $(basename "$0") [--repo PATH] [--github-repo OWNER/NAME]" >&2
+      echo "Usage: $(basename "$0") [--repo PATH] [--github-repo OWNER/NAME] [--strategy queue|squash|...]" >&2
       exit 0
       ;;
     *)
@@ -100,7 +102,7 @@ else
 fi
 
 section "3. GitHub"
-strategy="${RELEASE_MANAGER_STRATEGY:-queue}"
+strategy="${strategy_arg:-${RELEASE_MANAGER_STRATEGY:-queue}}"
 repo_meta=""          # cached `gh repo view --json …` blob, reused by section 4
 if command -v "$GH_BIN" >/dev/null 2>&1 && "$GH_BIN" auth status >/dev/null 2>&1; then
   pass "gh auth status ok"
@@ -112,6 +114,14 @@ if [[ -n "$repo_path" ]]; then
   if [[ -d "$repo_path/.git" ]]; then
     repo_path="$(cd "$repo_path" && pwd)"
     pass "repo is git checkout ($repo_path)"
+    # Will release-manager merge anything? It only merges PRs with GREEN CI; a PR
+    # with NO checks is skipped (checks=none) unless --allow-no-checks. A brand-new
+    # repo often has no PR-triggered CI at all, so the loop runs but merges nothing.
+    if grep -rqE 'pull_request' "$repo_path/.github/workflows/" 2>/dev/null; then
+      pass "pull_request-triggered CI found in .github/workflows (release-manager can gate on green checks)"
+    else
+      warn "no pull_request-triggered CI in .github/workflows: release-manager skips every PR (checks=none) UNLESS you pass --allow-no-checks. Add PR CI, or use --allow-no-checks only where every label-adder is trusted."
+    fi
     slug="$(resolve_repo_slug 2>/dev/null || true)"
     if [[ -n "$slug" ]]; then
       pass "GitHub repo slug: $slug"
