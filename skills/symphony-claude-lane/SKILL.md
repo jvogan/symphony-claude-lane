@@ -32,8 +32,9 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 7. Prefer same-project label-filtered routing when labels are used. Recommend a separate queue or Linear project only when the adopter needs stronger operational separation.
 8. Add routing and dispatch guidance to the target repo's orchestration docs. Use `assets/claude-lane-guidance.snippet.md` as a starting point. Do not hardcode repo specifics back into this shared skill.
 9. Help the adopter set up Claude worker launch capability. Use `references/worker-launch.md` for the secure tmux launch pattern and `assets/claude-worker.reference.sh` as a starting point for the launcher script. If the adopter prefers API pricing or a fully headless subprocess, read `../../docs/backend-options.md` and adapt deliberately rather than mixing semantics. Use `assets/worker-prompt.template.md` as the basis for worker prompts. Adapt all paths, auth, and MCP config to the adopter's environment.
-10. For tickets that affect rendered output, default to Playwright-based verification before closeout.
-11. Define closeout, retry, `In Review`, and cleanup behavior as part of the routing contract, including how worktrees, snapshots, and other heavy local artifacts are removed safely.
+10. If workers will receive "deploy" instructions or many PRs may finish concurrently, add a separate release-manager lane using `../../docs/release-manager-lane.md`: workers mark PRs `release:ready` and stop; one release manager owns queue/merge/deploy/Done closeout.
+11. For tickets that affect rendered output, default to Playwright-based verification before closeout.
+12. Define closeout, retry, `In Review`, release-manager, and cleanup behavior as part of the routing contract, including how worktrees, snapshots, and other heavy local artifacts are removed safely.
 
 ## Safety defaults
 
@@ -46,6 +47,7 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Launch Claude workers with an allowlisted environment rather than inheriting the full operator shell.
 - Treat the backend as an explicit design choice. Tmux is the default for attachable long-horizon workers; `claude -p` is acceptable only when the adopter intentionally wants API-priced headless execution and preserves the same routing, prompt, outcome, closeout, and cleanup contracts.
 - Prefer operator-reviewed closeout unless the adopter already has a safe self-close path.
+- Keep merge-to-main and production deploys in a single-owner release-manager lane. Workers may prepare PRs and add `release:ready`, but should not merge, rebase, push to `main`, trigger production, or move issues to `Done` unless the adopter has explicitly chosen a direct-Done flow.
 - Render the intended closeout state into the worker prompt so issue text cannot choose `Done` versus `In Review`.
 - Verify tracker state after worker success when self-close or worker-driven closeout is allowed. Surface `closeout_verified=false` or `check_failed` as warnings.
 - Support current `symphony-outcome` comments and legacy `symphony:outcome verdict=pass` comments during migration, but never auto-promote current failed or blocked outcomes.
@@ -61,6 +63,7 @@ If those conditions are not true, explain the gap and stop or redirect to a more
 - Read `references/dispatch.md` when defining queue split, model selection, and worker lifecycle.
 - Read `references/worker-launch.md` when helping the adopter set up the Claude worker launcher, MCP config, or security practices.
 - Read `../../docs/backend-options.md` when the adopter asks about tmux versus `claude -p`, API pricing, or a hybrid backend.
+- Read `../../docs/release-manager-lane.md` when the adopter asks about autonomous deploys, high-volume PR merging, "deploy" commands, merge queues, or avoiding parallel workers fighting over `main`.
 - Read `references/visual-verification.md` before writing browser-verification policy.
 - Read `references/closeout.md` when defining `In Review`, outcome blocks, retry behavior, or self-close rules.
 - Read `references/troubleshooting.md` when a worker stalls, exhausts turns, or drifts from the routing contract.
@@ -74,6 +77,7 @@ When this skill is applied well, the target repo should end up with:
 - a durable routing profile with model selection criteria
 - clear routing rules — task-characteristic analysis, label overrides, or both
 - explicit Claude backend selection — tmux by default, `claude -p` by deliberate adaptation, or a hybrid split
+- an explicit release-manager contract when workers can prepare deployable PRs: workers add `release:ready`; one release manager serializes `main`, waits for merge/deploy evidence when configured, and posts tracker closeout
 - explicit privacy and redaction rules for all worker artifacts
 - repo-local orchestration guidance describing what each model handles and why
 - a Playwright-first visual verification rule for tickets that affect rendered output

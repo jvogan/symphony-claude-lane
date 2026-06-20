@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# release-manager-doctor — preflight checks for the release-manager lane.
+set -uo pipefail
+
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+
+repo_path=""
+github_repo=""
+GH_BIN="${RELEASE_MANAGER_GH_BIN:-gh}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) repo_path="${2:?--repo requires a path}"; shift 2 ;;
+    --github-repo) github_repo="${2:?--github-repo requires OWNER/NAME}"; shift 2 ;;
+    -h|--help)
+      echo "Usage: $(basename "$0") [--repo PATH] [--github-repo OWNER/NAME]" >&2
+      exit 0
+      ;;
+    *)
+      echo "release-manager-doctor: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+PASS=0; FAIL=0; WARN=0
+pass(){ printf '  PASS  %s\n' "$1"; PASS=$((PASS+1)); }
+fail(){ printf '  FAIL  %s\n' "$1"; FAIL=$((FAIL+1)); }
+warn(){ printf '  WARN  %s\n' "$1"; WARN=$((WARN+1)); }
+section(){ printf '\n%s\n' "$1"; }
+
+parse_origin_slug() {
+  local url="$1"
+  case "$url" in
+    git@github.com:*) url="${url#git@github.com:}"; url="${url%.git}" ;;
+    https://github.com/*|http://github.com/*)
+      url="${url#https://github.com/}"; url="${url#http://github.com/}"; url="${url%.git}" ;;
+    *) return 1 ;;
+  esac
+  [[ "$url" =~ ^[^/]+/[^/]+$ ]] || return 1
+  printf '%s\n' "$url"
+}
+
+resolve_repo_slug() {
+  if [[ -n "$github_repo" ]]; then
+    printf '%s\n' "$github_repo"
+    return 0
+  fi
+  [[ -n "$repo_path" ]] || return 1
+  local origin
+  origin="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+  if [[ -n "$origin" ]] && parse_origin_slug "$origin" >/dev/null; then
+    parse_origin_slug "$origin"
+    return 0
+  fi
+  (cd "$repo_path" && "$GH_BIN" repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+}
+
+printf 'release-manager-doctor — release lane preflight\n'
+printf 'root: %s\n' "$SYMPHONY_CLAUDE_ROOT"
+
+section "1. Commands"
+for cmd in git jq shasum curl; do
+  if command -v "$cmd" >/dev/null 2>&1; then pass "$cmd installed ($(command -v "$cmd"))"; else fail "$cmd missing"; fi
+done
+if command -v "$GH_BIN" >/dev/null 2>&1; then
+  pass "gh installed ($(command -v "$GH_BIN"))"
+else
+  fail "gh not found ($GH_BIN)"
+fi
+
+section "2. Environment"
+for var in RELEASE_MANAGER_READY_LABEL RELEASE_MANAGER_QUEUED_LABEL RELEASE_MANAGER_MERGED_LABEL RELEASE_MANAGER_FAILED_LABEL RELEASE_MANAGER_BASE_BRANCH RELEASE_MANAGER_STRATEGY; do
+  if [[ -n "${!var:-}" ]]; then pass "$var=${!var}"; else fail "$var unset"; fi
+done
+if [[ -n "${CLAUDE_RUNS_ROOT:-}" && -d "$CLAUDE_RUNS_ROOT" && -w "$CLAUDE_RUNS_ROOT" ]]; then
+  pass "CLAUDE_RUNS_ROOT writable ($CLAUDE_RUNS_ROOT)"
+else
+  fail "CLAUDE_RUNS_ROOT missing or not writable (${CLAUDE_RUNS_ROOT:-unset})"
+fi
+
+section "3. GitHub"
+if command -v "$GH_BIN" >/dev/null 2>&1 && "$GH_BIN" auth status >/dev/null 2>&1; then
+  pass "gh auth status ok"
+else
+  warn "gh auth status failed; dry-run with RELEASE_MANAGER_GH_BIN stubs still works"
+fi
+
+if [[ -n "$repo_path" ]]; then
+  if [[ -d "$repo_path/.git" ]]; then
+    repo_path="$(cd "$repo_path" && pwd)"
+    pass "repo is git checkout ($repo_path)"
+    slug="$(resolve_repo_slug 2>/dev/null || true)"
+    if [[ -n "$slug" ]]; then
+      pass "GitHub repo slug: $slug"
+      if "$GH_BIN" repo view "$slug" --json nameWithOwner >/dev/null 2>&1; then
+        pass "gh can read repository $slug"
+      else
+        warn "gh cannot read repository $slug"
+      fi
+    else
+      warn "could not resolve GitHub repo slug; pass --github-repo"
+    fi
+  else
+    fail "--repo is not a git checkout: $repo_path"
+  fi
+else
+  warn "--repo not provided; skipping repo-specific GitHub checks"
+fi
+
+section "4. Linear"
+if [[ -z "${LINEAR_API_KEY:-}" ]]; then
+  warn "LINEAR_API_KEY unset; release-manager can run with --no-linear"
+else
+  header="$(mktemp)"
+  printf 'Authorization: %s' "$LINEAR_API_KEY" > "$header"
+  resp="$(curl -sS https://api.linear.app/graphql -H @"$header" -H "Content-Type: application/json" --data '{"query":"query{viewer{id name}}"}' 2>/dev/null || echo '{}')"
+  rm -f "$header"
+  viewer="$(jq -r '.data.viewer.name // empty' <<<"$resp" 2>/dev/null || true)"
+  if [[ -n "$viewer" ]]; then pass "Linear viewer query ok ($viewer)"; else warn "Linear viewer query failed"; fi
+fi
+
+section "5. Locks"
+lock_count=0
+stale_count=0
+if [[ -d "${CLAUDE_RUNS_ROOT:-}" ]]; then
+  for lock_dir in "$CLAUDE_RUNS_ROOT"/.release-manager.lock-*.d; do
+    [[ -d "$lock_dir" ]] || continue
+    lock_count=$((lock_count + 1))
+    pid="$(cat "$lock_dir/pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      warn "live release-manager lock: $(basename "$lock_dir") pid=$pid"
+    else
+      stale_count=$((stale_count + 1))
+      warn "stale release-manager lock: $(basename "$lock_dir") pid=${pid:-unknown}"
+    fi
+  done
+fi
+if [[ "$lock_count" -eq 0 ]]; then
+  pass "no release-manager locks present"
+elif [[ "$stale_count" -eq 0 ]]; then
+  pass "$lock_count release-manager lock(s), none stale"
+fi
+
+section "Summary"
+printf 'release-manager-doctor: %s passed, %s failed, %s warned\n' "$PASS" "$FAIL" "$WARN"
+[[ "$FAIL" -eq 0 ]]

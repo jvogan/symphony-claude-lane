@@ -101,6 +101,21 @@ export CLAUDE_ALLOWED_ASSIGNEE="${CLAUDE_ALLOWED_ASSIGNEE:-}"
 # Cleanup defaults
 export CLAUDE_CLEANUP_REQUIRE_INTEGRATED="${CLAUDE_CLEANUP_REQUIRE_INTEGRATED:-true}"
 
+# Release manager lane defaults. Worker agents should only mark PRs/issues
+# ready; this lane is the single owner for queueing, merging, deploy waiting,
+# and terminal tracker closeout.
+export RELEASE_MANAGER_READY_LABEL="${RELEASE_MANAGER_READY_LABEL:-release:ready}"
+export RELEASE_MANAGER_QUEUED_LABEL="${RELEASE_MANAGER_QUEUED_LABEL:-release:queued}"
+export RELEASE_MANAGER_MERGED_LABEL="${RELEASE_MANAGER_MERGED_LABEL:-release:merged}"
+export RELEASE_MANAGER_FAILED_LABEL="${RELEASE_MANAGER_FAILED_LABEL:-release:failed}"
+export RELEASE_MANAGER_BASE_BRANCH="${RELEASE_MANAGER_BASE_BRANCH:-main}"
+export RELEASE_MANAGER_STRATEGY="${RELEASE_MANAGER_STRATEGY:-queue}"
+export RELEASE_MANAGER_MAX_PER_RUN="${RELEASE_MANAGER_MAX_PER_RUN:-3}"
+export RELEASE_MANAGER_POLL_SECONDS="${RELEASE_MANAGER_POLL_SECONDS:-15}"
+export RELEASE_MANAGER_WAIT_SECONDS="${RELEASE_MANAGER_WAIT_SECONDS:-1800}"
+export RELEASE_MANAGER_LINEAR_DONE_STATE="${RELEASE_MANAGER_LINEAR_DONE_STATE:-Done}"
+export RELEASE_MANAGER_LINEAR_FAILURE_STATE="${RELEASE_MANAGER_LINEAR_FAILURE_STATE:-Todo}"
+
 # ---------- RunPod-conditional selectors (re-evaluated each source) ----------
 # These two values depend on CLAUDE_WORKER_ENABLE_RUNPOD. They re-evaluate on
 # every source so an operator can:
