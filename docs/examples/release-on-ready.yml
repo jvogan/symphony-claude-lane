@@ -1,0 +1,96 @@
+# Event-driven release manager (GitHub-only mode) — COPY ME to enable.
+#
+# This is a TEMPLATE, intentionally shipped under docs/examples/ so it is NOT
+# active in this repo. To use it, copy it into YOUR repo at
+#     .github/workflows/release-on-ready.yml
+# and commit. It makes the single-writer release lane fully hands-off: workers
+# add the `release:ready` label and stop; this workflow runs the one-shot
+# release-manager, which merges ready + CI-green PRs serially into the base
+# branch. Nothing else merges.
+#
+# WHY SEVERAL TRIGGERS — the release-manager only merges a PR once its CI is
+# GREEN. A worker usually adds `release:ready` WHILE CI is still running, so a
+# single `labeled` trigger would observe pending checks and skip. We therefore
+# also re-run when a check suite COMPLETES, plus a periodic safety net:
+#   - pull_request (labeled)   : label added when CI was already green
+#   - check_suite (completed)  : CI finished after the label was added  <-- key
+#   - schedule (cron)          : backstop (e.g. external / commit-status checks
+#                                that do not emit check_suite events)
+#   - workflow_dispatch        : manual kick
+# Each run re-evaluates the whole ready+green queue, so the exact triggering PR
+# does not matter — any trigger drains everything currently mergeable.
+#
+# SERIALIZATION — the `concurrency` group ensures only ONE release-manager run
+# executes at a time across all triggers. That is the single-writer guarantee
+# that kills the rebase storm; it replaces the local mkdir-lock the CLI uses on
+# a workstation.
+#
+# TRUST BOUNDARY — a PR is merged only if it BOTH carries `release:ready` AND
+# has green CI. The real guard on `main` is therefore who/what can add the
+# label plus your required checks. Keep at least one required check, and
+# restrict label-add permission to trusted actors.
+
+name: Release on ready
+
+on:
+  pull_request:
+    types: [labeled]
+  check_suite:
+    types: [completed]
+  schedule:
+    - cron: '*/10 * * * *'   # backstop every 10 min; tune or remove
+  workflow_dispatch:
+
+permissions:
+  contents: write          # merge into the base branch
+  pull-requests: write     # read PRs, move labels
+
+concurrency:
+  group: release-manager   # ONE writer at a time
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # For label events, act only on release:ready. Other event types always run
+    # (they re-scan the full queue, so the triggering PR is irrelevant).
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.label.name == 'release:ready'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out target repository
+        uses: actions/checkout@v4
+
+      - name: Check out symphony-claude-lane (provides bin/release-manager)
+        uses: actions/checkout@v4
+        with:
+          repository: jvogan/symphony-claude-lane
+          ref: main          # pin a tag once you adopt, for reproducibility
+          path: .scl
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Ensure release labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for L in release:ready release:queued release:merged release:failed; do
+            gh label create "$L" -R "${{ github.repository }}" 2>/dev/null || true
+          done
+
+      - name: Drain release:ready PRs (serial, CI-gated)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Personal repos: --strategy squash (serial, no repo settings needed).
+          # Org repos with GitHub Merge Queue: switch to --strategy queue.
+          .scl/bin/release-manager \
+            --repo . \
+            --github-repo "${{ github.repository }}" \
+            --no-linear \
+            --strategy squash \
+            --apply \
+            --max 20

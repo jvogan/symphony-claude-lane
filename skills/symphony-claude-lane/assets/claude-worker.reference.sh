@@ -714,6 +714,7 @@ tmux new-session -d -s "$tmux_session" -c "$worktree_path" \
 # Cleanup: if dispatcher setup fails before the monitor takes over, kill the
 # session so we don't leak. Disarmed once monitor_and_teardown is in charge.
 _handoff_complete=false
+# shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup_on_failure EXIT' below
 cleanup_on_failure() {
   [[ "$_handoff_complete" == "true" ]] && return
   tmux has-session -t "=$tmux_session:" 2>/dev/null && \

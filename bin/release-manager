@@ -155,13 +155,13 @@ acquire_lock() {
   [[ "$mode" == "apply" ]] || return 0
   "$RELEASE_LOCK_HELD" && return 0
   mkdir -p "$locks_root" 2>/dev/null || true
-  local lock_dir holder retry
+  local lock_dir holder
   lock_dir="$(lock_dir_for "$repo_path" "$base_branch" "$ready_label")"
   if ! mkdir "$lock_dir" 2>/dev/null; then
     holder=""
     [[ -r "$lock_dir/pid" ]] && holder="$(cat "$lock_dir/pid" 2>/dev/null || echo)"
     if [[ -z "$holder" ]]; then
-      for retry in 1 2 3 4 5; do
+      for _ in 1 2 3 4 5; do
         sleep 0.1
         [[ -r "$lock_dir/pid" ]] && holder="$(cat "$lock_dir/pid" 2>/dev/null || echo)"
         [[ -n "$holder" ]] && break

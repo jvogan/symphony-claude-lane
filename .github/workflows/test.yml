@@ -18,10 +18,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install jq
+      - name: Install jq and shellcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq shellcheck
 
       - name: Check shell syntax
         run: |
@@ -42,6 +42,19 @@ jobs:
             tests/test_routing_feedback.sh \
             tests/test_release_manager_doctor.sh \
             tests/test_launcher_recovery.sh \
+            skills/symphony-claude-lane/assets/claude-worker.reference.sh
+
+      - name: Lint shell (shellcheck, warnings + errors)
+        run: |
+          shellcheck -S warning \
+            env.sh \
+            bin/claude-doctor \
+            bin/claude-version \
+            bin/claude-tmux-finalize \
+            bin/release-manager \
+            bin/release-manager-doctor \
+            bin/release-status \
+            bin/routing-feedback \
             skills/symphony-claude-lane/assets/claude-worker.reference.sh
 
       - name: Validate JSON configs
