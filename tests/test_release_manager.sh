@@ -584,6 +584,28 @@ else
   bad "GraphQL query declares unused variable(s):$gql_unused"
 fi
 
+banner "Action template grants the read scopes statusCheckRollup needs"
+# The event-driven Action runs release-manager under GITHUB_TOKEN. `gh pr list
+# --json statusCheckRollup` traverses check runs + commit statuses + the check
+# suite's Actions workflow run, so the workflow MUST grant checks/statuses/actions
+# read on top of the write scopes — otherwise the listing fails with "Resource
+# not accessible by integration" and the lane silently merges nothing. (Verified
+# live; invisible to a local PAT, which already has every scope.)
+TPL="$ROOT/docs/examples/release-on-ready.yml"
+if [[ -f "$TPL" ]]; then
+  tpl_miss=""
+  for perm in "checks: read" "statuses: read" "actions: read"; do
+    grep -qE "^[[:space:]]*${perm}([[:space:]]|\$)" "$TPL" || tpl_miss="$tpl_miss [$perm]"
+  done
+  if [[ -z "$tpl_miss" ]]; then
+    ok "release-on-ready.yml grants checks + statuses + actions read"
+  else
+    bad "release-on-ready.yml missing read scope(s):$tpl_miss"
+  fi
+else
+  bad "release-on-ready.yml template not found at $TPL"
+fi
+
 banner "Summary"
 echo "  PASS=$PASS FAIL=$FAIL"
 (( FAIL == 0 ))

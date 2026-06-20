@@ -40,6 +40,10 @@
 #     workflows (an `on: push` deploy on the base branch will not fire). If you
 #     need downstream automation on merge, swap in a PAT or GitHub App token:
 #     `GH_TOKEN: ${{ secrets.RELEASE_PAT }}`.
+#   * The token needs checks:read + statuses:read + actions:read (set in the
+#     permissions block below) on TOP of the write scopes. The CI gate's
+#     statusCheckRollup query reaches the check suite's workflow run, so a
+#     missing read makes `gh pr list` fail and the lane merge nothing — silently.
 #
 # TRUST BOUNDARY — a PR is merged only if it BOTH carries `release:ready` AND
 # has green CI. The real guard on `main` is therefore who/what can add the
@@ -65,6 +69,13 @@ on:
 permissions:
   contents: write          # merge into the base branch
   pull-requests: write     # read PRs, move labels
+  # The CI gate reads each PR's statusCheckRollup, which the GraphQL API
+  # traverses all the way down to checkSuite.workflowRun. Without ALL THREE of
+  # these reads, `gh pr list --json statusCheckRollup` fails with "Resource not
+  # accessible by integration" and the lane silently merges NOTHING.
+  checks: read             # check runs
+  statuses: read           # commit statuses
+  actions: read            # the check suite's Actions workflow run
 
 concurrency:
   group: release-manager   # ONE writer at a time
