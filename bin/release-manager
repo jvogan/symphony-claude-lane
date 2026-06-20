@@ -103,7 +103,16 @@ release_locks() {
   done
   return 0
 }
-trap release_locks EXIT INT TERM
+# Release the lock on ANY exit. INT/TERM must translate into an EXIT, not merely
+# run the handler: a bare `trap release_locks INT TERM` would clean up and then
+# RESUME the --loop — leaving the process un-killable by Ctrl-C / SIGTERM and
+# (because the handler removed the lock dir while RELEASE_LOCK_HELD stayed true)
+# running with NO lock on disk, which would let a SECOND release-manager start
+# and break the single-writer guarantee. So convert the signal into a normal
+# exit and let the single EXIT trap perform the cleanup.
+trap release_locks EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 safe_meta_value() {
   local name="$1" value="$2"
@@ -283,9 +292,14 @@ linear_issue_uuid() {
 linear_state_id() {
   local issue_id="$1" state_name="$2" team_key
   team_key="${issue_id%%-*}"
+  # The query must NOT declare a $name variable: the state name is matched
+  # client-side in jq below, and Linear REJECTS any query that declares a variable
+  # it never references ('Variable "$name" is never used.'), which would fail every
+  # issue state transition (merge->Done, conflict->rebase state, failure->Todo).
+  # Pass ONLY $tk to the server; keep the name match in jq.
   linear_graphql \
-    'query($tk:String!,$name:String!){teams(filter:{key:{eq:$tk}},first:1){nodes{states{nodes{id name}}}}}' \
-    "$(jq -nc --arg tk "$team_key" --arg name "$state_name" '{tk:$tk,name:$name}')" |
+    'query($tk:String!){teams(filter:{key:{eq:$tk}},first:1){nodes{states{nodes{id name}}}}}' \
+    "$(jq -nc --arg tk "$team_key" '{tk:$tk}')" |
     jq -r --arg name "$state_name" '.data.teams.nodes[0].states.nodes[] | select(.name == $name) | .id' | head -1
 }
 
@@ -527,7 +541,7 @@ process_once() {
   log "repo=$github_repo base=$base_branch label=$ready_label mode=$mode strategy=$strategy max=$max_per_run"
 
   local candidates count pr_json pr ready_rc reason title url head processed merge_sha deploy_url
-  local conclusion ready_observed queued_at merged_at_epoch conflict_conclusion
+  local conclusion ready_observed queued_at merged_at_epoch conflict_conclusion merged_confirmed
 
   # Reclaim orphans before listing: an OPEN PR still carrying the queued label is
   # the residue of an interruption between the ready->queued flip and a completed
@@ -609,10 +623,19 @@ process_once() {
       queued_at="$(date +%s)"
       if merge_pr "$pr"; then
         merge_sha=""
+        merged_confirmed=false
         if "$wait_merge" || [[ -n "$deploy_workflow" ]]; then
           merge_sha="$(wait_for_merge "$pr" || true)"
+          [[ -n "$merge_sha" ]] && merged_confirmed=true
+        elif [[ "$strategy" != "queue" && "$strategy" != "auto" ]]; then
+          # Immediate strategies (squash/merge/rebase) merge SYNCHRONOUSLY: a zero
+          # exit from `gh pr merge` means the PR is already merged, so that IS the
+          # terminal release:merged state — no polling needed. queue/auto only
+          # SCHEDULE an auto-merge (it lands later when checks pass), so they stay
+          # release:queued until --wait-merge or a later reconcile confirms it.
+          merged_confirmed=true
         fi
-        [[ -n "$merge_sha" ]] && merged_at_epoch="$(date +%s)"
+        [[ "$merged_confirmed" == true ]] && merged_at_epoch="$(date +%s)"
         detail="merge requested via strategy=$strategy"
         [[ -n "$merge_sha" ]] && detail="$detail merge_sha=$merge_sha"
         if [[ -n "$deploy_workflow" ]]; then
@@ -629,7 +652,7 @@ process_once() {
             label_transition "$pr" "$failed_label" "$queued_label"
             post_linear_evidence "$pr" "$url" "failed" "$detail deploy_workflow_failed=$deploy_workflow" "$title" "$head"
           fi
-        elif [[ -n "$merge_sha" ]]; then
+        elif [[ "$merged_confirmed" == true ]]; then
           conclusion="merged"
           label_transition "$pr" "$merged_label" "$queued_label"
           post_linear_evidence "$pr" "$url" "merged" "$detail" "$title" "$head"
