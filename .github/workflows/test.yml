@@ -34,6 +34,7 @@ jobs:
             bin/release-manager-doctor \
             bin/release-status \
             bin/routing-feedback \
+            bin/goal-manager \
             tests/test_mcp_runpod_optin.sh \
             tests/test_tmux_sentinel_malformed.sh \
             tests/test_env_isolation.sh \
@@ -42,6 +43,7 @@ jobs:
             tests/test_routing_feedback.sh \
             tests/test_release_manager_doctor.sh \
             tests/test_launcher_recovery.sh \
+            tests/test_goal_manager.sh \
             skills/symphony-claude-lane/assets/claude-worker.reference.sh
 
       - name: Lint shell (shellcheck, warnings + errors)
@@ -55,6 +57,7 @@ jobs:
             bin/release-manager-doctor \
             bin/release-status \
             bin/routing-feedback \
+            bin/goal-manager \
             skills/symphony-claude-lane/assets/claude-worker.reference.sh
 
       - name: Validate JSON configs
@@ -73,3 +76,4 @@ jobs:
           bash tests/test_routing_feedback.sh
           bash tests/test_release_manager_doctor.sh
           bash tests/test_launcher_recovery.sh
+          bash tests/test_goal_manager.sh

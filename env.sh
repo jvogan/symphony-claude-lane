@@ -128,6 +128,23 @@ export RELEASE_MANAGER_REBASE_STATE="${RELEASE_MANAGER_REBASE_STATE:-Todo}"
 export RELEASE_MANAGER_MAX_REBASE_ATTEMPTS="${RELEASE_MANAGER_MAX_REBASE_ATTEMPTS:-2}"
 export RELEASE_MANAGER_METRICS_FILE="${RELEASE_MANAGER_METRICS_FILE:-$CLAUDE_RUNS_ROOT/release-metrics.jsonl}"
 
+# Goal layer (goal-manager). The durable goal lives in a Linear PROJECT; ephemeral
+# "planner" passes mint the next wave of work tickets, and the heartbeat merges via
+# the release lane. These are fail-closed budgets: the caps + no-new-work halt are
+# what make hours-long unattended autonomy safe. goal:planner tickets are dispatched
+# with assets/goal-planner-prompt.template.md (NOT the worker prompt). GOAL_MANAGER_TEAM_KEY
+# has no default — set it (or pass --team) before `goal-manager init`.
+export GOAL_MANAGER_PLANNER_LABEL="${GOAL_MANAGER_PLANNER_LABEL:-goal:planner}"
+export GOAL_MANAGER_PLANNED_LABEL="${GOAL_MANAGER_PLANNED_LABEL:-goal:planned}"
+export GOAL_MANAGER_NOWORK_LABEL="${GOAL_MANAGER_NOWORK_LABEL:-goal:nowork}"
+export GOAL_MANAGER_TASK_LABEL="${GOAL_MANAGER_TASK_LABEL:-$CLAUDE_REQUIRED_LABEL}"
+export GOAL_MANAGER_BUDGET_TASKS="${GOAL_MANAGER_BUDGET_TASKS:-20}"
+export GOAL_MANAGER_BUDGET_PASSES="${GOAL_MANAGER_BUDGET_PASSES:-10}"
+export GOAL_MANAGER_NO_NEW_WORK_HALT="${GOAL_MANAGER_NO_NEW_WORK_HALT:-2}"
+export GOAL_MANAGER_BACKLOG_MIN="${GOAL_MANAGER_BACKLOG_MIN:-0}"
+export GOAL_MANAGER_MAX_PER_WAVE="${GOAL_MANAGER_MAX_PER_WAVE:-5}"
+export GOAL_MANAGER_POLL_SECONDS="${GOAL_MANAGER_POLL_SECONDS:-60}"
+
 # ---------- RunPod-conditional selectors (re-evaluated each source) ----------
 # These two values depend on CLAUDE_WORKER_ENABLE_RUNPOD. They re-evaluate on
 # every source so an operator can:
