@@ -6,9 +6,9 @@
 
 ![Symphony + Claude Lane](assets/banner.jpg)
 
-**Long-horizon multi-agent orchestration via Linear. Claude Code workers run subscription-billed in attachable tmux sessions, optionally paired with Codex via Symphony.**
+**Long-horizon multi-agent orchestration for Claude Code workers, run subscription-billed in attachable tmux sessions and tracked through Linear. Mix and match with Codex workers via Symphony.**
 
-[Symphony](https://github.com/openai/symphony) dispatches [Codex](https://openai.com/index/codex/) workers through its Elixir runtime. This [agent skill](https://agentskills.io/specification) adds [Claude Code](https://docs.anthropic.com/en/docs/claude-code) workers to the same workflow — running as **interactive sessions inside detached tmux panes** in isolated git worktrees, tracked through the same [Linear](https://linear.app) backlog, with smart routing that sends each task to the agent best suited for it.
+[Symphony](https://github.com/openai/symphony) dispatches [Codex](https://openai.com/index/codex/) workers through its Elixir runtime. This [agent skill](https://agentskills.io/specification) adds [Claude Code](https://docs.anthropic.com/en/docs/claude-code) workers to the same workflow, running as **interactive sessions inside detached tmux panes** in isolated git worktrees, tracked through the same [Linear](https://linear.app) backlog, with smart routing that sends each task to the agent best suited for it.
 
 You install the skill, point it at a repo, and your orchestrator agent learns how to route tasks between models, launch Claude workers securely, verify frontend output with Playwright, and close out work through Linear.
 
@@ -34,7 +34,7 @@ Long-horizon AI work needs more than "send one prompt and hope." Complex product
 
 ## Why run both?
 
-Different AI agents have different strengths. Running both against the same Linear backlog — each claiming tasks that match what it's best at — produces better output than either alone.
+Different AI agents have different strengths. Running both against the same Linear backlog, each claiming tasks that match what it's best at, produces better output than either alone.
 
 | Claude Code | Codex |
 |---|---|
@@ -45,7 +45,7 @@ Different AI agents have different strengths. Running both against the same Line
 | Documentation, product copy | Parallelizable batch of similar tasks |
 | E2E tests (sandbox-incompatible) | Fast execution where speed > judgment |
 
-The skill also supports **Claude-only** setups for teams that don't use Codex. With the default tmux backend, no API plumbing is required — both Codex and Claude Code are subscription tools with built-in agent capabilities.
+The skill also supports **Claude-only** setups for teams that don't use Codex. With the default tmux backend, no API plumbing is required, since both Codex and Claude Code are subscription tools with built-in agent capabilities.
 
 ## Backend choice
 
@@ -55,7 +55,7 @@ If your team prefers API-priced or fully headless execution, keep the same routi
 
 ## Prerequisites
 
-**Full mode (Symphony + Linear)** — make sure you have:
+**Full mode (Symphony + Linear).** Make sure you have:
 
 - An **existing Symphony + Linear workflow** (see [symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter) if you need to set one up)
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** and/or **[Codex](https://openai.com/index/codex/)** installed
@@ -64,14 +64,14 @@ If your team prefers API-priced or fully headless execution, keep the same routi
 - A target git repo with orchestration configured
 - On the dispatcher host: **`tmux`**, `jq`, `git`, `curl`, `python3` (run `bin/claude-doctor` after install to verify)
 
-**GitHub-only mode (minimum)** — for the worker→release-manager flow with no tracker:
+**GitHub-only mode (minimum).** For the worker→release-manager flow with no tracker:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** and/or **[Codex](https://openai.com/index/codex/)** installed
 - the **`gh` CLI** authenticated (`gh auth status`)
 - a GitHub repo where you can create labels (for the `release:*` handoff state machine)
 - `gh`, `jq`, `git` for the release manager itself; **`tmux` + `claude` only if you use the bundled worker launcher** (driving workers yourself doesn't need them)
 
-No Linear or Symphony required for GitHub-only mode — see [`docs/github-only-quickstart.md`](docs/github-only-quickstart.md). Use `bin/release-manager-doctor` (not `bin/claude-doctor`) as the GitHub-only preflight.
+No Linear or Symphony required for GitHub-only mode. See [`docs/github-only-quickstart.md`](docs/github-only-quickstart.md). Use `bin/release-manager-doctor` (not `bin/claude-doctor`) as the GitHub-only preflight.
 
 ## Install
 
@@ -129,7 +129,7 @@ For the expanded setup path, see [`docs/quickstart.md`](docs/quickstart.md).
 2. Confirm the base workflow has guardrails (bootstrap assertions, stop-loss) before adding Claude workers.
 3. Analyze the repo's work patterns and ask about routing preferences.
 4. Create a routing profile (`.orchestration/claude-lane.yaml`) with model selection criteria, label overrides, privacy rules, and cleanup policy.
-5. Set up the Claude worker launcher — the secure process for dispatching interactive `claude` sessions in tmux panes against Linear issues in isolated git worktrees.
+5. Set up the Claude worker launcher: the secure process for dispatching interactive `claude` sessions in tmux panes against Linear issues in isolated git worktrees.
 6. Add the release-manager contract if workers will say "deploy": workers mark PRs `release:ready`, and one release manager owns queue/merge/deploy/Done closeout.
 7. Document the routing contract so both human operators and agents know how tasks get dispatched and released.
 
@@ -149,11 +149,22 @@ For the expanded setup path, see [`docs/quickstart.md`](docs/quickstart.md).
 
 The skill includes a [reference launcher script](skills/symphony-claude-lane/assets/claude-worker.reference.sh) and [worker launch docs](skills/symphony-claude-lane/references/worker-launch.md) with a full security checklist you can adapt to your environment.
 
+## Long-horizon goals (the goal layer)
+
+The release lane executes and merges a backlog. The optional **goal layer** decides what the next wave of work should be. You give it a durable goal: a north star, acceptance criteria, and a budget. It then drives the lane through many waves until the goal is met or a guard stops it, so a goal can be pursued for hours without a human curating each wave.
+
+- **`/goal "<outcome>"`** frames the goal and wires the loop.
+- **`bin/goal-manager`** holds durable goal state in a Linear project and owns every termination guard: dedup, task and pass budgets, a no-new-work halt, and a single-writer lock. It mints work tickets and planner passes, never launching agents or merging. Dry-run by default; `--apply` to mutate.
+- Planning runs as an ephemeral agent: a `goal:planner` ticket that re-derives the next wave from durable state each pass, then exits. This mirrors the merge lane's stateless, idempotent design one level up, so there is no long-running planning process to keep alive.
+- A heartbeat (`goal-manager tick --loop`) merges what's ready through the release lane and mints the next planner when the backlog runs low, stopping itself when acceptance is met (`done`) or a guard trips (`halted`).
+
+Dispatch (who launches the agents) stays external: Symphony, the launcher, or you. Merging stays in the single CI-gated release lane. See [`docs/goal-layer.md`](docs/goal-layer.md).
+
 ## Example prompts
 
 ```
-Use $symphony-claude-lane to set up smart multi-model routing for this repo —
-analyze what types of work appear in the backlog and recommend which agent
+Use $symphony-claude-lane to set up smart multi-model routing for this repo.
+Analyze what types of work appear in the backlog and recommend which agent
 handles what.
 ```
 ```
@@ -210,19 +221,22 @@ Those decisions belong in the adopter repo, not in this shared skill.
 | `skills/.../assets/review-audit.reference.py` | Reference parser for current and legacy outcome comments |
 | `skills/.../assets/worker-prompt.template.md` | Worker prompt template with trust boundary, capabilities, and closeout protocol |
 | `skills/.../assets/linear-outcome-block.example.md` | Example machine-readable closeout comments |
+| `skills/.../assets/goal-planner-prompt.template.md` | Goal-layer planner prompt; outputs the next wave of work tickets |
 | `skills/.../agents/openai.yaml` | Skill metadata |
-| `bin/claude-doctor` | Preflight battery — verify env, deps, Linear connectivity, lane state |
+| `bin/claude-doctor` | Preflight battery: verify env, deps, Linear connectivity, lane state |
 | `bin/claude-version` | Print install root, branch/commit, default model env, and `claude` CLI version |
 | `bin/claude-tmux-finalize` | Worker-invoked helper that writes the completion sentinel JSON |
-| `bin/release-manager` | Single-owner release lane for `release:ready` PRs — serialize merge-to-main, closed-loop rebase recovery (`--on-conflict redispatch`), decoupled deploy-evidence (`--reconcile-deploys`), and per-PR JSONL metrics; dry-run by default, explicit `--apply` to mutate |
+| `bin/release-manager` | Single-owner release lane for `release:ready` PRs: serialize merge-to-main, closed-loop rebase recovery (`--on-conflict redispatch`), decoupled deploy-evidence (`--reconcile-deploys`), and per-PR JSONL metrics; dry-run by default, explicit `--apply` to mutate |
 | `bin/release-manager-doctor` | Preflight battery for GitHub CLI auth, Merge Queue config, Linear reachability, repo remotes, release-manager env, and stale locks |
 | `bin/release-status` | Read-only snapshot of `release:ready`/`queued`/`merged`/`failed` PR counts and time-to-main (p50/p90) from the metrics log; never mutates |
 | `bin/routing-feedback` | Read-only analyzer of worker outcomes (model, pass-rate, latency) that proposes routing-profile edits for human review; never writes |
+| `bin/goal-manager` | Goal-layer engine: durable goal state in a Linear project plus all termination guards (dedup, task/pass budgets, no-new-work halt, single-writer lock); mints work tickets and planner passes; dry-run by default, `--apply` to mutate |
+| `commands/goal.md` | `/goal`: bootstrap a long-horizon goal and wire the heartbeat loop above the release lane |
 | `env.sh` | Source to set lane defaults (paths, model, routing label, MCP config, env allowlist) |
 | `mcp/worker-mcp.json` | Default MCP config (Linear only) |
 | `mcp/worker-mcp-runpod.json` | Opt-in MCP config (Linear + RunPod) |
 | `settings/claude-settings.tmux.json` | Per-worktree `.claude/settings.json` with `bypassPermissions` |
-| `tests/` | Eight fully-isolated regression tests (sentinel-malformed, MCP opt-in, env isolation, release-manager, release-status, routing-feedback, release-manager-doctor, launcher-recovery) |
+| `tests/` | Nine fully-isolated regression tests (sentinel-malformed, MCP opt-in, env isolation, release-manager, release-status, routing-feedback, release-manager-doctor, launcher-recovery, goal-manager) |
 | `docs/architecture.md` | Sentinel JSON contract, dispatch lock semantics, autoset-marker pattern |
 | `docs/backend-options.md` | How to choose tmux, `claude -p`, or a hybrid backend intentionally |
 | `docs/lessons.md` | Bug-by-bug postmortems from the tmux backend build |
@@ -230,6 +244,7 @@ Those decisions belong in the adopter repo, not in this shared skill.
 | `docs/migration-v2-to-v3.md` | What changes if you adopted v2.0.1 |
 | `docs/github-only-quickstart.md` | Run the worker→release-manager flow with only Claude Code/Codex + GitHub (no Linear/Symphony) |
 | `docs/release-manager-lane.md` | Worker/release-manager split for high-volume PR queueing, merge, conflict recovery, deploy, metrics, and Linear closeout |
+| `docs/goal-layer.md` | The goal layer: durable goal state, ephemeral planner passes, guards, and running modes above the release lane |
 | `docs/conflict-aware-dispatch.md` | Design/roadmap: prevent merge conflicts at dispatch time via predicted file-overlap staggering |
 | `llms.txt` | Agent-oriented summary of the repo |
 
@@ -258,10 +273,10 @@ Those decisions belong in the adopter repo, not in this shared skill.
 These are the operational defaults the lane assumes. Operator-adapted launchers should keep them.
 
 - **Explicit routing required.** Workers refuse to dispatch unless the issue carries `lane:claude` (or a project name matching `$CLAUDE_ALLOWED_PROJECT_REGEX`, or a configured assignee). Override only with `--allow-unrouted` for deliberate trusted dispatch.
-- **Allowlisted worker environment.** The worker session is started with `env -i $allowlisted=value … claude …` as the tmux session command, so the worker sees only what the dispatcher explicitly forwards — not the full operator shell. `tmux new-session -e VAR=value` only *adds* to the session env; it does not *restrict*, so it is not sufficient on its own.
+- **Allowlisted worker environment.** The worker session is started with `env -i $allowlisted=value … claude …` as the tmux session command, so the worker sees only what the dispatcher explicitly forwards rather than the full operator shell. `tmux new-session -e VAR=value` only *adds* to the session env; it does not *restrict*, so it is not sufficient on its own.
 - **In Review by default.** Successful workers move issues to `In Review` and stop. Use `--self-close` only on trusted direct-Done flows.
 - **Workers do not own `main`.** When told "deploy", workers prepare or update a PR, validate it, add `release:ready`, post evidence, and stop. Only the release-manager lane queues, merges, deploys, or moves the issue to `Done` from merge/deploy evidence.
-- **Cleanup requires integration verification.** Don't remove worktrees just because the tracker says `Done` — verify the branch was actually merged or the snapshot promoted first.
+- **Cleanup requires integration verification.** Don't remove worktrees just because the tracker says `Done`; verify the branch was actually merged or the snapshot promoted first.
 - **Fallback outcome on failure.** When a worker dies before posting its outcome, a dispatcher should post a fallback `<!-- symphony-outcome -->` comment and move the issue to `$CLAUDE_TMUX_FAILURE_STATE` (default `Todo`). Prevents stuck-in-In-Progress tickets.
 - **First-launch dialogs handled defensively.** Real Claude Code shows trust + bypass-permissions dialogs in interactive mode (no flag suppresses them). The dispatcher must detect and dismiss them via `tmux capture-pane` + `tmux send-keys` before pasting the prompt. See `docs/lessons.md`.
 - **MCP defense-in-depth.** Tools (`mcp__runpod__*`) and credentials (`RUNPOD_API_KEY`) are jointly opt-in. A worker cannot bypass the MCP gate by calling RunPod via raw `curl` because the credentials are also withheld.
@@ -272,7 +287,7 @@ This is a **portable blueprint** with a reference implementation, not a turnkey 
 
 It includes a **reference launcher script** (`claude-worker.reference.sh`) and **worker launch docs** (`references/worker-launch.md`) that show the full secure launch pattern. Adapt these to your environment.
 
-The reference launcher spawns an interactive `claude` session inside a detached tmux pane (`tmux new-session -d`). The session command is `env -i $allowlisted=value … claude …` so the worker process starts with a stripped environment containing only the allowlisted variables — `tmux -e` is not used because it adds vars without restricting them. Workers signal completion through a JSON sentinel file written by the bundled `bin/claude-tmux-finalize` helper.
+The reference launcher spawns an interactive `claude` session inside a detached tmux pane (`tmux new-session -d`). The session command is `env -i $allowlisted=value … claude …` so the worker process starts with a stripped environment containing only the allowlisted variables. `tmux -e` is not used because it adds vars without restricting them. Workers signal completion through a JSON sentinel file written by the bundled `bin/claude-tmux-finalize` helper.
 
 It does **not** bundle:
 
@@ -312,11 +327,11 @@ Yes. In Claude-only mode, the control plane stays the same (Linear in full mode,
 
 ### Can I use this without Linear or Symphony?
 
-Yes — GitHub-only mode is a first-class supported path, and it scales up to Linear/Symphony without changing the worker contract. See [`docs/github-only-quickstart.md`](docs/github-only-quickstart.md) for the full walkthrough.
+Yes. GitHub-only mode is a first-class supported path, and it scales up to Linear/Symphony without changing the worker contract. See [`docs/github-only-quickstart.md`](docs/github-only-quickstart.md) for the full walkthrough.
 
-The storm fix is the producer/consumer split, and it works on **any** repo (personal or org): workers open a PR, get CI green, add the GitHub label `release:ready`, and **stop** — one `bin/release-manager --no-linear` process is the only writer to `main`. Fifteen agents can't collide when only one writer exists.
+The storm fix is the producer/consumer split, and it works on **any** repo (personal or org): workers open a PR, get CI green, add the GitHub label `release:ready`, and **stop**. One `bin/release-manager --no-linear` process is the only writer to `main`. Fifteen agents can't collide when only one writer exists.
 
-[GitHub Merge Queue](docs/github-only-quickstart.md) is only the *latency* fix (batched speculative CI) and is available **only on organization-owned repos** — personal repos can't use it. On a personal repo, `--strategy squash` gives serialized one-at-a-time merges with no setup. The GitHub-only preflight is `bin/release-manager-doctor` (not `bin/claude-doctor`, which needs Linear).
+[GitHub Merge Queue](docs/github-only-quickstart.md) is only the *latency* fix (batched speculative CI) and is available **only on organization-owned repos**; personal repos can't use it. On a personal repo, `--strategy squash` gives serialized one-at-a-time merges with no setup. The GitHub-only preflight is `bin/release-manager-doctor` (not `bin/claude-doctor`, which needs Linear).
 
 ### Why use Linear as the control plane?
 
@@ -328,15 +343,15 @@ RunPod is opt-in at two layers: MCP tools are only loaded from `mcp/worker-mcp-r
 
 ## Related
 
-- **[symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter)** — The base orchestration skill for Symphony + Linear, with self-improving runbooks, bootstrap scripts, and issue contracts. Install this first if you don't have Symphony + Linear set up yet.
+- **[symphony-linear-starter](https://github.com/jvogan/symphony-linear-starter)**: the base orchestration skill for Symphony + Linear, with self-improving runbooks, bootstrap scripts, and issue contracts. Install this first if you don't have Symphony + Linear set up yet.
 
 ## Links
 
-- [OpenAI Symphony](https://github.com/openai/symphony) — Elixir-based dispatch and isolation runtime for Codex workers
-- [Linear](https://linear.app) — issue tracker used for routing and state
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — agent runtime for Claude workers
-- [Codex](https://openai.com/index/codex/) — agent runtime for Codex workers
-- [Agent Skills spec](https://agentskills.io/specification) — the open standard this skill follows
+- [OpenAI Symphony](https://github.com/openai/symphony): Elixir-based dispatch and isolation runtime for Codex workers
+- [Linear](https://linear.app): issue tracker used for routing and state
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code): agent runtime for Claude workers
+- [Codex](https://openai.com/index/codex/): agent runtime for Codex workers
+- [Agent Skills spec](https://agentskills.io/specification): the open standard this skill follows
 
 Contributions and feedback welcome via [GitHub issues](https://github.com/jvogan/symphony-claude-lane/issues).
 
