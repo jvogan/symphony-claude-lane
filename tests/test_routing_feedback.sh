@@ -47,8 +47,19 @@ trap run_cleanup EXIT INT TERM
 
 RF="$ROOT/bin/routing-feedback"
 
-# mtime helper that works on both BSD (stat -f %m) and GNU (stat -c %Y).
-mtime_of(){ stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null; }
+# mtime (epoch seconds) helper. GNU stat uses `-c %Y`; BSD/macOS uses `-f %m`.
+# Try the GNU form first, because on GNU `stat -f` means "filesystem status" (not
+# format) and would treat `%m` as a path operand, printing volatile filesystem data
+# instead of an mtime. Accept only a pure integer, so any misparsed output falls
+# through rather than masquerading as a timestamp (which made unchanged files look
+# modified and flaked the read-only check in CI).
+mtime_of(){
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null)"
+  [[ "$m" =~ ^[0-9]+$ ]] || m="$(stat -f %m "$1" 2>/dev/null)"
+  [[ "$m" =~ ^[0-9]+$ ]] || m=0
+  printf '%s\n' "$m"
+}
 
 banner "Setup"
 TMP="$(mktemp -d -t routing-feedback-test.XXXXXX)"
